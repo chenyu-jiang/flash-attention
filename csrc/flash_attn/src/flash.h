@@ -102,10 +102,19 @@ struct Flash_fwd_params : public Qkv_params {
     // The indices to index into the KV cache.
     int * __restrict__ cache_batch_idx;
 
-    // Paged KV cache
-    int * __restrict__ block_table;
-    index_t block_table_batch_stride;
-    int page_block_size;
+    // Paged QKV and output matrices.
+    int * __restrict__ block_table_q;
+    index_t block_table_batch_stride_q;
+    int page_block_size_q;
+
+    int * __restrict__ block_table_kv;
+    index_t block_table_batch_stride_kv;
+    int page_block_size_kv;
+
+    int * __restrict__ block_table_out;
+    index_t block_table_batch_stride_out;
+    int page_block_size_out;
+    int num_page_blocks_out;
 
     // The dropout probability (probability of keeping an activation).
     float p_dropout;

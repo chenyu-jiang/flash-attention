@@ -531,15 +531,26 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         n_block_max = std::min(n_block_max,
                                cute::ceil_div((m_block + 1) * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q + params.window_size_right, kBlockN));
     }
+    // if(tidx == 0) {
+    //     const index_t row_offset_lseaccum = ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM;
+    //     printf("bidb = %d, bidh = %d, m_block = %d, n_split_idx = %d, num_n_splits = %d, n_block_min = %d, n_block_max = %d, row_offset_lseaccum = %d\n", bidb, bidh, m_block, n_split_idx, num_n_splits, n_block_min, n_block_max, row_offset_lseaccum);
+    // }
     if (n_block_min >= n_block_max) {  // This also covers the case where n_block_max <= 0
         // We exit early and write 0 to gOaccum and -inf to gLSEaccum.
         // Otherwise we might read OOB elements from gK and gV,
         // or get wrong results when we combine gOaccum from different blocks.
-        const index_t row_offset_o = binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)
-            + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride;
+        const int *block_table_out = params.block_table_out == nullptr ? nullptr : params.block_table_out + bidb * params.block_table_batch_stride_out;
+        const int block_table_o_idx = block_table_out == nullptr ? 0 : m_block * kBlockM / params.page_block_size_out;
+        const int block_table_o_offset = block_table_out == nullptr ? 0 : m_block * kBlockM - block_table_o_idx * params.page_block_size_out;
+
+        const index_t row_offset_o = block_table_out == nullptr ?
+            binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb) + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride
+            : block_table_out[block_table_o_idx] * params.o_batch_stride + block_table_o_offset * params.o_row_stride + bidh * params.o_head_stride;
         const index_t row_offset_oaccum = (((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q
             + m_block * kBlockM) * params.d_rounded;
-        const index_t row_offset_lseaccum = ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM;
+        const index_t row_offset_lseaccum = block_table_out == nullptr ?
+                                            ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM
+                                            : (params.num_page_blocks_out * params.page_block_size_out * bidh) + (block_table_out[block_table_o_idx] * params.page_block_size_out + block_table_o_offset);
         Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementO *>(Split ? params.oaccum_ptr : params.o_ptr) + (Split ? row_offset_oaccum : row_offset_o)),
                                       Shape<Int<kBlockM>, Int<kHeadDim>>{},
                                      make_stride(Split ? kHeadDim : params.o_row_stride, _1{}));
@@ -578,23 +589,31 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
     // We move K and V to the last block.
     const int bidb_cache = params.cache_batch_idx == nullptr ? bidb : params.cache_batch_idx[bidb];
-    const int *block_table = params.block_table == nullptr ? nullptr : params.block_table + bidb * params.block_table_batch_stride;
-    const int block_table_idx = block_table == nullptr ? 0 : (n_block_max - 1) * kBlockN / params.page_block_size;
-    const int block_table_offset = block_table == nullptr ? 0 : (n_block_max - 1) * kBlockN - block_table_idx * params.page_block_size;
-    const index_t row_offset_k = block_table == nullptr
+    const int *block_table_q = params.block_table_q == nullptr ? nullptr : params.block_table_q + bidb * params.block_table_batch_stride_q;
+    const int *block_table_kv = params.block_table_kv == nullptr ? nullptr : params.block_table_kv + bidb * params.block_table_batch_stride_kv;
+    const int block_table_q_idx = block_table_q == nullptr ? 0 : m_block * kBlockM / params.page_block_size_q;
+    const int block_table_q_offset = block_table_q == nullptr ? 0 : m_block * kBlockM - block_table_q_idx * params.page_block_size_q;
+    const int block_table_kv_idx = block_table_kv == nullptr ? 0 : (n_block_max - 1) * kBlockN / params.page_block_size_kv;
+    const int block_table_kv_offset = block_table_kv == nullptr ? 0 : (n_block_max - 1) * kBlockN - block_table_kv_idx * params.page_block_size_kv;
+
+    const index_t row_offset_q = block_table_q == nullptr
+        ? binfo.q_offset(params.q_batch_stride, params.q_row_stride, bidb)
+        : block_table_q[block_table_q_idx] * params.q_batch_stride + block_table_q_offset * params.q_row_stride;
+
+    const index_t row_offset_k = block_table_kv == nullptr
         ? binfo.k_offset(params.k_batch_stride, params.k_row_stride, bidb_cache)
           + (n_block_max - 1) * kBlockN * params.k_row_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride
-        : block_table[block_table_idx] * params.k_batch_stride + block_table_offset * params.k_row_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
-    const index_t row_offset_v = block_table == nullptr
+        : block_table_kv[block_table_kv_idx] * params.k_batch_stride + block_table_kv_offset * params.k_row_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
+    const index_t row_offset_v = block_table_kv == nullptr
         ? binfo.k_offset(params.v_batch_stride, params.v_row_stride, bidb_cache)
           + (n_block_max - 1) * kBlockN * params.v_row_stride + (bidh / params.h_h_k_ratio) * params.v_head_stride
-        : block_table[block_table_idx] * params.v_batch_stride + block_table_offset * params.v_row_stride + (bidh / params.h_h_k_ratio) * params.v_head_stride;
+        : block_table_kv[block_table_kv_idx] * params.v_batch_stride + block_table_kv_offset * params.v_row_stride + (bidh / params.h_h_k_ratio) * params.v_head_stride;
 
-    Tensor mQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element*>(params.q_ptr) + binfo.q_offset(params.q_batch_stride, params.q_row_stride, bidb)),
-                            make_shape(binfo.actual_seqlen_q, params.h, params.d),
+    Tensor mQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element*>(params.q_ptr) + row_offset_q),
+                            make_shape(kBlockM, params.h, params.d),
                             make_stride(params.q_row_stride, params.q_head_stride, _1{}));
     Tensor gQ = local_tile(mQ(_, bidh, _), Shape<Int<kBlockM>, Int<kHeadDim>>{},
-                           make_coord(m_block, 0));  // (kBlockM, kHeadDim)
+                           make_coord(0, 0));  // (kBlockM, kHeadDim)
     Tensor gK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.k_ptr) + row_offset_k),
                             Shape<Int<kBlockN>, Int<kHeadDim>>{},
                             make_stride(params.k_row_stride, _1{}));
@@ -757,16 +776,16 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 }
             }
             tKgKnew.data() = tKgKnew.data() + (-int(kBlockN * params.knew_row_stride));
-            if (block_table == nullptr) {
+            if (block_table_kv == nullptr) {
                 tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
                 if (n_block > n_block_copy_min) {
-                    const int block_table_idx_cur = n_block * kBlockN / params.page_block_size;
-                    const int block_table_offset_cur = n_block * kBlockN - block_table_idx_cur * params.page_block_size;
-                    const int block_table_idx_next = (n_block - 1) * kBlockN / params.page_block_size;
-                    const int block_table_offset_next = (n_block - 1) * kBlockN - block_table_idx_next * params.page_block_size;
-                    const int table_diff = block_table[block_table_idx_next] - block_table[block_table_idx_cur];
+                    const int block_table_idx_cur = n_block * kBlockN / params.page_block_size_kv;
+                    const int block_table_offset_cur = n_block * kBlockN - block_table_idx_cur * params.page_block_size_kv;
+                    const int block_table_idx_next = (n_block - 1) * kBlockN / params.page_block_size_kv;
+                    const int block_table_offset_next = (n_block - 1) * kBlockN - block_table_idx_next * params.page_block_size_kv;
+                    const int table_diff = block_table_kv[block_table_idx_next] - block_table_kv[block_table_idx_cur];
                     const int offset_diff = block_table_offset_next - block_table_offset_cur;
                     tVgV.data() = tVgV.data() + table_diff * params.v_batch_stride + offset_diff * params.v_row_stride;
                     tKgK.data() = tKgK.data() + table_diff * params.k_batch_stride + offset_diff * params.k_row_stride;
@@ -855,14 +874,14 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
         // Advance gV
         if (masking_step > 0) {
-            if (block_table == nullptr) {
+            if (block_table_kv == nullptr) {
                 tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
             } else {
-                const int block_table_idx_cur = (n_block + 1) * kBlockN / params.page_block_size;
-                const int block_table_offset_cur = (n_block + 1) * kBlockN - block_table_idx_cur * params.page_block_size;
-                const int block_table_idx_next = n_block * kBlockN / params.page_block_size;
-                const int block_table_offset_next = n_block * kBlockN - block_table_idx_next * params.page_block_size;
-                tVgV.data() = tVgV.data() + (block_table[block_table_idx_next] - block_table[block_table_idx_cur]) * params.v_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.v_row_stride;
+                const int block_table_idx_cur = (n_block + 1) * kBlockN / params.page_block_size_kv;
+                const int block_table_offset_cur = (n_block + 1) * kBlockN - block_table_idx_cur * params.page_block_size_kv;
+                const int block_table_idx_next = n_block * kBlockN / params.page_block_size_kv;
+                const int block_table_offset_next = n_block * kBlockN - block_table_idx_next * params.page_block_size_kv;
+                tVgV.data() = tVgV.data() + (block_table_kv[block_table_idx_next] - block_table_kv[block_table_idx_cur]) * params.v_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.v_row_stride;
             }
             flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tVgV, tVsV, tKVcKV, tKVpKV);
         } else {
@@ -894,14 +913,14 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
         if (n_block > n_block_min) {
             // Advance gK
-            if (block_table == nullptr) {
+            if (block_table_kv == nullptr) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
-                const int block_table_idx_cur = n_block * kBlockN / params.page_block_size;
-                const int block_table_offset_cur = n_block * kBlockN - block_table_idx_cur * params.page_block_size;
-                const int block_table_idx_next = (n_block - 1) * kBlockN / params.page_block_size;
-                const int block_table_offset_next =(n_block - 1) * kBlockN - block_table_idx_next * params.page_block_size;
-                tKgK.data() = tKgK.data() + (block_table[block_table_idx_next] - block_table[block_table_idx_cur]) * params.k_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.k_row_stride;
+                const int block_table_idx_cur = n_block * kBlockN / params.page_block_size_kv;
+                const int block_table_offset_cur = n_block * kBlockN - block_table_idx_cur * params.page_block_size_kv;
+                const int block_table_idx_next = (n_block - 1) * kBlockN / params.page_block_size_kv;
+                const int block_table_offset_next =(n_block - 1) * kBlockN - block_table_idx_next * params.page_block_size_kv;
+                tKgK.data() = tKgK.data() + (block_table_kv[block_table_idx_next] - block_table_kv[block_table_idx_cur]) * params.k_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.k_row_stride;
             }
             flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
@@ -937,14 +956,14 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         flash::cp_async_wait<0>();
         __syncthreads();
         // Advance gV
-        if (block_table == nullptr) {
+        if (block_table_kv == nullptr) {
             tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
         } else {
-            const int block_table_idx_cur = (n_block + 1) * kBlockN / params.page_block_size;
-            const int block_table_offset_cur = (n_block + 1) * kBlockN - block_table_idx_cur * params.page_block_size;
-            const int block_table_idx_next = n_block * kBlockN / params.page_block_size;
-            const int block_table_offset_next = n_block * kBlockN - block_table_idx_next * params.page_block_size;
-            tVgV.data() = tVgV.data() + (block_table[block_table_idx_next] - block_table[block_table_idx_cur]) * params.v_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.v_row_stride;
+            const int block_table_idx_cur = (n_block + 1) * kBlockN / params.page_block_size_kv;
+            const int block_table_offset_cur = (n_block + 1) * kBlockN - block_table_idx_cur * params.page_block_size_kv;
+            const int block_table_idx_next = n_block * kBlockN / params.page_block_size_kv;
+            const int block_table_offset_next = n_block * kBlockN - block_table_idx_next * params.page_block_size_kv;
+            tVgV.data() = tVgV.data() + (block_table_kv[block_table_idx_next] - block_table_kv[block_table_idx_cur]) * params.v_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.v_row_stride;
         }
         flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tVgV, tVsV, tKVcKV, tKVpKV);
         cute::cp_async_fence();
@@ -961,14 +980,14 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         __syncthreads();
         if (n_block > n_block_min) {
             // Advance gK
-            if (block_table == nullptr) {
+            if (block_table_kv == nullptr) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
-                const int block_table_idx_cur = n_block * kBlockN / params.page_block_size;
-                const int block_table_offset_cur = n_block * kBlockN - block_table_idx_cur * params.page_block_size;
-                const int block_table_idx_next = (n_block - 1) * kBlockN / params.page_block_size;
-                const int block_table_offset_next = (n_block - 1) * kBlockN - block_table_idx_next * params.page_block_size;
-                tKgK.data() = tKgK.data() + (block_table[block_table_idx_next] - block_table[block_table_idx_cur]) * params.k_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.k_row_stride;
+                const int block_table_idx_cur = n_block * kBlockN / params.page_block_size_kv;
+                const int block_table_offset_cur = n_block * kBlockN - block_table_idx_cur * params.page_block_size_kv;
+                const int block_table_idx_next = (n_block - 1) * kBlockN / params.page_block_size_kv;
+                const int block_table_offset_next = (n_block - 1) * kBlockN - block_table_idx_next * params.page_block_size_kv;
+                tKgK.data() = tKgK.data() + (block_table_kv[block_table_idx_next] - block_table_kv[block_table_idx_cur]) * params.k_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.k_row_stride;
             }
             flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
@@ -1013,13 +1032,23 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
     cute::copy(smem_tiled_copy_Oaccum, taccOrOaccum, taccOsOaccum);
 
-    const index_t row_offset_o = binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)
-        + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride;
+    const int *block_table_out = params.block_table_out == nullptr ? nullptr : params.block_table_out + bidb * params.block_table_batch_stride_out;
+    const int block_table_o_idx = block_table_out == nullptr ? 0 : m_block * kBlockM / params.page_block_size_out;
+    const int block_table_o_offset = block_table_out == nullptr ? 0 : m_block * kBlockM - block_table_o_idx * params.page_block_size_out;
+
+    const index_t row_offset_o = block_table_out == nullptr ?
+        binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb) + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride
+        : block_table_out[block_table_o_idx] * params.o_batch_stride + block_table_o_offset * params.o_row_stride + bidh * params.o_head_stride;
+    // if (tidx == 0) {
+    //     printf("bidb = %d, bidh = %d, m_block = %d, kBlockM = %d, block_table_o_idx = %d, block_table_o_offset = %d, row_offset_o = %ld\n",
+    //            bidb, bidh, m_block, kBlockM, block_table_o_idx, block_table_o_offset, row_offset_o);
+    // }
     const index_t row_offset_oaccum = (((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q
                                          + m_block * kBlockM) * params.d_rounded;
-    const index_t row_offset_lseaccum = (Split || !params.unpadded_lse ?
+    const index_t row_offset_lseaccum = block_table_out == nullptr ? ((Split || !params.unpadded_lse ?
             ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q : bidh * params.total_q + binfo.q_offset(params.seqlen_q, 1, bidb)
-        ) + m_block * kBlockM;
+        ) + m_block * kBlockM)
+        : (params.num_page_blocks_out * params.page_block_size_out * bidh) + (block_table_out[block_table_o_idx] * params.page_block_size_out + block_table_o_offset);
 
     Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementO *>(Split ? params.oaccum_ptr : params.o_ptr) + (Split ? row_offset_oaccum : row_offset_o)),
                                  Shape<Int<kBlockM>, Int<kHeadDim>>{},

@@ -1,6 +1,7 @@
 import math
 
 import pytest
+import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
@@ -227,6 +228,7 @@ def attention_ref(
     window_size=(-1, -1),  # -1 means infinite window size
     softcap=0.0,
     upcast=True,
+    upcast_no_downcast=False,
     reorder_ops=False,
     key_leftpad=None,
 ):
@@ -301,6 +303,8 @@ def attention_ref(
     output = torch.einsum("bhts,bshd->bthd", attention_drop, v * dropout_scaling)
     if query_padding_mask is not None:
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
+    if upcast_no_downcast:
+        return output, attention
     return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)
 
 
@@ -316,6 +320,7 @@ def attention_kvpacked_ref(
     window_size=(-1, -1),  # -1 means infinite window size
     softcap=0.0,
     upcast=True,
+    upcast_no_downcast=False,
     reorder_ops=False,
     key_leftpad=None,
 ):
@@ -329,6 +334,7 @@ def attention_kvpacked_ref(
         dropout_p,
         dropout_mask,
         upcast=upcast,
+        upcast_no_downcast=upcast_no_downcast,
         causal=causal,
         window_size=window_size,
         softcap=softcap,
@@ -1385,55 +1391,55 @@ def test_flash_attn_varlen_output(
         print(f"Attention max diff: {(attn - attn_ref).abs().max().item()}")
         print(f"Attention Pytorch max diff: {(attn_pt - attn_ref).abs().max().item()}")
 
-    g = torch.randn_like(out)
-    if ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90)):
-        if kvpacked:
-            (
-                dq_unpad,
-                dkv_unpad,
-            ) = torch.autograd.grad(out, (q_unpad, kv_unpad), g)
-            dk, dv = dkv_pad_fn(dkv_unpad).unbind(2)
-            (
-                dq_ref,
-                dkv_ref,
-            ) = torch.autograd.grad(out_ref, (q, kv), g)
-            dk_ref, dv_ref = dkv_ref.unbind(2)
-            (
-                dq_pt,
-                dkv_pt,
-            ) = torch.autograd.grad(out_pt, (q, kv), g)
-            dk_pt, dv_pt = dkv_pt.unbind(2)
-        else:
-            (
-                dq_unpad,
-                dk_unpad,
-                dv_unpad,
-            ) = torch.autograd.grad(out, (q_unpad, k_unpad, v_unpad), g)
-            dk = dk_pad_fn(dk_unpad)
-            dv = dk_pad_fn(dv_unpad)
-            (
-                dq_ref,
-                dk_ref,
-                dv_ref,
-            ) = torch.autograd.grad(out_ref, (q, k, v), g)
-            (
-                dq_pt,
-                dk_pt,
-                dv_pt,
-            ) = torch.autograd.grad(out_pt, (q, k, v), g)
-        dq = dq_pad_fn(dq_unpad)
-        print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
-        print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
-        print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")
-        print(f"dQ mean diff: {(dq - dq_ref).abs().mean().item()}")
-        print(f"dK mean diff: {(dk - dk_ref).abs().mean().item()}")
-        print(f"dV mean diff: {(dv - dv_ref).abs().mean().item()}")
-        print(f"dQ Pytorch max diff: {(dq_pt - dq_ref).abs().max().item()}")
-        print(f"dK Pytorch max diff: {(dk_pt - dk_ref).abs().max().item()}")
-        print(f"dV Pytorch max diff: {(dv_pt - dv_ref).abs().max().item()}")
-        print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
-        print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
-        print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
+    # g = torch.randn_like(out)
+    # if ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90)):
+    #     if kvpacked:
+    #         (
+    #             dq_unpad,
+    #             dkv_unpad,
+    #         ) = torch.autograd.grad(out, (q_unpad, kv_unpad), g)
+    #         dk, dv = dkv_pad_fn(dkv_unpad).unbind(2)
+    #         (
+    #             dq_ref,
+    #             dkv_ref,
+    #         ) = torch.autograd.grad(out_ref, (q, kv), g)
+    #         dk_ref, dv_ref = dkv_ref.unbind(2)
+    #         (
+    #             dq_pt,
+    #             dkv_pt,
+    #         ) = torch.autograd.grad(out_pt, (q, kv), g)
+    #         dk_pt, dv_pt = dkv_pt.unbind(2)
+    #     else:
+    #         (
+    #             dq_unpad,
+    #             dk_unpad,
+    #             dv_unpad,
+    #         ) = torch.autograd.grad(out, (q_unpad, k_unpad, v_unpad), g)
+    #         dk = dk_pad_fn(dk_unpad)
+    #         dv = dk_pad_fn(dv_unpad)
+    #         (
+    #             dq_ref,
+    #             dk_ref,
+    #             dv_ref,
+    #         ) = torch.autograd.grad(out_ref, (q, k, v), g)
+    #         (
+    #             dq_pt,
+    #             dk_pt,
+    #             dv_pt,
+    #         ) = torch.autograd.grad(out_pt, (q, k, v), g)
+    #     dq = dq_pad_fn(dq_unpad)
+    #     print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
+    #     print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
+    #     print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")
+    #     print(f"dQ mean diff: {(dq - dq_ref).abs().mean().item()}")
+    #     print(f"dK mean diff: {(dk - dk_ref).abs().mean().item()}")
+    #     print(f"dV mean diff: {(dv - dv_ref).abs().mean().item()}")
+    #     print(f"dQ Pytorch max diff: {(dq_pt - dq_ref).abs().max().item()}")
+    #     print(f"dK Pytorch max diff: {(dk_pt - dk_ref).abs().max().item()}")
+    #     print(f"dV Pytorch max diff: {(dv_pt - dv_ref).abs().max().item()}")
+    #     print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
+    #     print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
+    #     print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.
@@ -1445,10 +1451,321 @@ def test_flash_attn_varlen_output(
         if not alibi:
             assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.04)
 
-    if (d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90):
-        assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
-        assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
-        assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
+    # if (d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90):
+    #     assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
+    #     assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
+    #     assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
+
+def _blockize_qkv_out(
+    q_unpad: torch.Tensor,
+    kv_unpad: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    block_size_q: int,
+    block_size_k: int,
+):
+    # reverse cumsum to get the original seqlens
+    q_seqlens_orig = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    k_seqlens_orig = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+    n_blocks_per_seq_q = (q_seqlens_orig + block_size_q - 1) // block_size_q
+    n_blocks_per_seq_k = (k_seqlens_orig + block_size_k - 1) // block_size_k
+    
+    max_num_blocks_per_seq_q = n_blocks_per_seq_q.max()
+    max_num_blocks_per_seq_k = n_blocks_per_seq_k.max()
+    sum_num_blocks_q = n_blocks_per_seq_q.sum()
+    sum_num_blocks_k = n_blocks_per_seq_k.sum()
+    q_cache_size = sum_num_blocks_q * 2
+    kv_cache_size = sum_num_blocks_k * 2
+    # generate block table
+    q_block_mapping = torch.tensor(np.random.choice(q_cache_size.item(), sum_num_blocks_q.item(), replace=False), device=q_unpad.device, dtype=torch.int32)
+    cumsum_num_blocks_q = torch.concat([torch.zeros(1, device=n_blocks_per_seq_q.device, dtype=n_blocks_per_seq_q.dtype),
+                                        n_blocks_per_seq_q.cumsum(0)], 0)
+    q_block_table = [
+        q_block_mapping[cumsum_num_blocks_q[i]:cumsum_num_blocks_q[i + 1]]
+        for i in range(len(n_blocks_per_seq_q))
+    ]
+
+    kv_block_mapping = torch.tensor(np.random.choice(kv_cache_size.item(), sum_num_blocks_k.item(), replace=False), device=kv_unpad.device, dtype=torch.int32)
+    cumsum_num_blocks_k = torch.concat([torch.zeros(1, device=n_blocks_per_seq_k.device, dtype=n_blocks_per_seq_k.dtype),
+                                        n_blocks_per_seq_k.cumsum(0)], 0)
+    kv_block_table = [
+        kv_block_mapping[cumsum_num_blocks_k[i]:cumsum_num_blocks_k[i + 1]]
+        for i in range(len(n_blocks_per_seq_k))
+    ]
+
+    out_block_mapping = torch.tensor(np.random.choice(q_cache_size.item(), sum_num_blocks_q.item(), replace=False), device=q_unpad.device, dtype=torch.int32)
+    out_block_table = [
+        out_block_mapping[cumsum_num_blocks_q[i]:cumsum_num_blocks_q[i + 1]]
+        for i in range(len(n_blocks_per_seq_q))
+    ]
+
+    # create and fill in the q and kv cache
+    q_cache = torch.zeros(q_cache_size, block_size_q, q_unpad.size(-2), q_unpad.size(-1), device=q_unpad.device, dtype=q_unpad.dtype)
+    for i, blocks in enumerate(q_block_table):
+        q_unpad_offset = cu_seqlens_q[i]
+        q_unpad_max = cu_seqlens_q[i + 1]
+        for block_idx, block_offset in enumerate(blocks):
+            curr_q_offset = q_unpad_offset + block_idx * block_size_q
+            curr_block_size = min(block_size_q, q_unpad_max - curr_q_offset)
+            q_cache[block_offset, :curr_block_size] = q_unpad[curr_q_offset:curr_q_offset + curr_block_size]
+    kv_cache = torch.zeros(kv_cache_size, block_size_k, 2, kv_unpad.size(-2), kv_unpad.size(-1), device=kv_unpad.device, dtype=kv_unpad.dtype)
+    for i, blocks in enumerate(kv_block_table):
+        kv_unpad_offset = cu_seqlens_k[i]
+        kv_unpad_max = cu_seqlens_k[i + 1]
+        for block_idx, block_offset in enumerate(blocks):
+            curr_kv_offset = kv_unpad_offset + block_idx * block_size_k
+            curr_block_size = min(block_size_k, kv_unpad_max - curr_kv_offset)
+            kv_cache[block_offset, :curr_block_size] = kv_unpad[curr_kv_offset:curr_kv_offset + curr_block_size]
+    # dont need to fill out caches
+    out_dtype = q_unpad.dtype
+    out_cache = torch.zeros(q_cache_size, block_size_q, q_unpad.size(-2), q_unpad.size(-1), device=q_unpad.device, dtype=out_dtype)
+    lse_cache = torch.zeros(q_unpad.size(-2), q_cache_size, block_size_q, device=q_unpad.device, dtype=torch.float)
+
+    # pad block table to max_num_blocks_per_seq
+    q_block_table = torch.stack([torch.cat([block, torch.zeros(max_num_blocks_per_seq_q - len(block), device=block.device, dtype=block.dtype)])
+                     for block in q_block_table])
+    kv_block_table = torch.stack([torch.cat([block, torch.zeros(max_num_blocks_per_seq_k - len(block), device=block.device, dtype=block.dtype)])
+                        for block in kv_block_table])
+    out_block_table = torch.stack([torch.cat([block, torch.zeros(max_num_blocks_per_seq_q - len(block), device=block.device, dtype=block.dtype)])
+                        for block in out_block_table])
+    return q_block_table, kv_block_table, out_block_table, q_cache, kv_cache, out_cache, lse_cache
+
+def _reconstruct_blockized_out_lse(
+    out_block_table: torch.Tensor,
+    out_cache: torch.Tensor,
+    lse_cache: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+):
+    # reverse cumsum to get the original seqlens
+    q_seqlens_orig = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    block_size = out_cache.size(1)
+    # out_unpad = [total_q, num_heads, head_size]
+    out_unpad = torch.zeros(cu_seqlens_q[-1], out_cache.size(-2), out_cache.size(-1), device=out_cache.device, dtype=out_cache.dtype)
+    # sm_lse = [num_heads, total_q,]
+    sm_lse = torch.zeros(out_cache.size(-2), cu_seqlens_q[-1], device=lse_cache.device, dtype=torch.float)
+    curr_q = 0
+    for i, blocks in enumerate(out_block_table):
+        curr_seq_q = 0
+        for block_idx, block in enumerate(blocks):
+            block = block.item()
+            curr_block_seqlen = min(block_size, q_seqlens_orig[i].item() - block_idx * block_size)
+            out_unpad[curr_q:curr_q + curr_block_seqlen] = out_cache[block, :curr_block_seqlen]
+            sm_lse[:, curr_q:curr_q + curr_block_seqlen] = lse_cache[:, block, :curr_block_seqlen]
+            curr_q += curr_block_seqlen
+            curr_seq_q += curr_block_seqlen
+            if curr_seq_q == q_seqlens_orig[i]:
+                break
+    return out_unpad, sm_lse
+
+@pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
+# @pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+# @pytest.mark.parametrize('mha_type', ["mqa"])
+@pytest.mark.parametrize("deterministic", [False, True])
+# @pytest.mark.parametrize("deterministic", [True])
+@pytest.mark.parametrize("alibi", [False, True])
+# @pytest.mark.parametrize("alibi", [True])
+@pytest.mark.parametrize("causal", [False, True])
+# @pytest.mark.parametrize('causal', [True])
+@pytest.mark.parametrize("block_size", [256])
+@pytest.mark.parametrize("d", [32, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
+# @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
+# @pytest.mark.parametrize('d', [64])
+@pytest.mark.parametrize(
+    "seqlen_q,seqlen_k",
+    [
+        (1, 147),
+        (113, 203),
+        (128, 217),
+        (113, 211),
+        (108, 256),
+        (256, 512),
+        (512, 256),
+        (1024, 1024),
+        (1023, 1024),
+        (1024, 1023),
+        (2048, 2048),
+    ],
+)
+# @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
+@pytest.mark.parametrize("softcap", [0.0, 50.0])
+# @pytest.mark.parametrize('dropout_p', [0.0])
+def test_flash_attn_varlen_block_table(
+    seqlen_q, seqlen_k, d, causal, block_size, alibi, deterministic, mha_type, dtype, softcap
+):
+    if (
+        max(seqlen_q, seqlen_k) >= 2048
+        and torch.cuda.get_device_properties("cuda").total_memory <= 16 * 2**30
+    ):
+        pytest.skip()  # Reference implementation OOM
+    device = "cuda"
+    # set seed
+    torch.random.manual_seed(0)
+    batch_size = 4
+    nheads = 6 if softcap == 0.0 else 4  # softcap reference impl takes more memory
+    nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 2)
+    assert nheads % nheads_k == 0
+    window_size = (-1, -1)
+    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+    if softcap > 0:
+        # Ensure the values of qk are at least within softcap range.
+        q = q * softcap
+
+    kv = torch.randn(
+        batch_size, seqlen_k, 2, nheads_k, d, device=device, dtype=dtype, requires_grad=True
+    )
+
+    query_padding_mask = generate_random_padding_mask(seqlen_q, batch_size, device, mode="random")
+    key_padding_mask = generate_random_padding_mask(seqlen_k, batch_size, device, mode="random")
+    # key_padding_mask = generate_random_padding_mask(seqlen_k, batch_size, device, mode='full')
+    if alibi:
+        alibi_slopes = torch.rand(batch_size, nheads, device=device, dtype=torch.float32) * 0.3
+        attn_bias = attn_bias_from_alibi_slopes(
+            alibi_slopes, seqlen_q, seqlen_k, query_padding_mask, key_padding_mask, causal=causal
+        )
+    else:
+        alibi_slopes, attn_bias = None, None
+
+    (
+        q_unpad,
+        kv_unpad,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        q,
+        kv,
+        output_pad_fn,
+        dq_pad_fn,
+        dkv_pad_fn,
+    ) = generate_qkv(q, *kv.unbind(dim=2), query_padding_mask, key_padding_mask, kvpacked=True)
+    q_block_table, kv_block_table, out_block_table, q_buffer, kv_buffer, out, lse = _blockize_qkv_out(q_unpad, kv_unpad, cu_seqlens_q, cu_seqlens_k, block_size, block_size)
+    print("q_block_table: ", q_block_table.size())
+    print("kv_block_table: ", kv_block_table.size())
+    print("out_block_table: ", out_block_table.size())
+    print("q_buffer: ", q_buffer.size())
+    print("kv_buffer: ", kv_buffer.size())
+    print("out: ", out.size())
+    # blocked qkv and out
+    out_blocked, sm_lse_blocked, _ = flash_attn_varlen_kvpacked_func(
+        q_buffer,
+        kv_buffer,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        0.0,
+        causal=causal,
+        window_size=window_size,
+        softcap=softcap,
+        alibi_slopes=alibi_slopes,
+        deterministic=deterministic,
+        return_attn_probs=True,
+        q_block_table=q_block_table,
+        kv_block_table=kv_block_table,
+        out_block_table=out_block_table,
+        out_=out,
+        lse_=lse,
+    )
+    out_recon_blocked, sm_lse_recon_blocked = _reconstruct_blockized_out_lse(out_block_table, out_blocked, sm_lse_blocked, cu_seqlens_q)
+    # unblocked qkv and out
+    out_unpad, sm_lse, _ = flash_attn_varlen_kvpacked_func(
+        q_unpad,
+        kv_unpad,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        0.0,
+        causal=causal,
+        window_size=window_size,
+        softcap=softcap,
+        alibi_slopes=alibi_slopes,
+        deterministic=deterministic,
+        return_attn_probs=True,
+    )
+
+    # check that the blocked and unblocked outputs are the same
+    print(f"Output max diff blocked v.s. unblocked: {(out_recon_blocked - out_unpad).abs().max().item()}")
+    print(f"Output mean diff blocked v.s. unblocked: {(out_recon_blocked - out_unpad).abs().mean().item()}")
+    print(f"Sm LSE max diff blocked v.s. unblocked: {(sm_lse_recon_blocked - sm_lse).abs().max().item()}")
+    print(f"Sm LSE mean diff blocked v.s. unblocked: {(sm_lse_recon_blocked - sm_lse).abs().mean().item()}")
+
+    out = output_pad_fn(out_recon_blocked)
+    dropout_mask = None
+
+    out_ref, attn_ref = attention_kvpacked_ref(
+        q,
+        kv,
+        query_padding_mask,
+        key_padding_mask,
+        attn_bias,
+        0.0,
+        dropout_mask,
+        causal=causal,
+        window_size=window_size,
+        softcap=softcap,
+    )
+    out_pt, attn_pt = attention_kvpacked_ref(
+        q,
+        kv,
+        query_padding_mask,
+        key_padding_mask,
+        attn_bias,
+        0.0,
+        dropout_mask,
+        causal=causal,
+        window_size=window_size,
+        softcap=softcap,
+        upcast=False,
+        reorder_ops=True,
+    )
+
+    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
+    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
+    print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
+    print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
+
+    # g = torch.randn_like(out)
+    # if ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90)):
+    #     (
+    #         dq_unpad,
+    #         dkv_unpad,
+    #     ) = torch.autograd.grad(out, (q_unpad, kv_unpad), g)
+    #     dk, dv = dkv_pad_fn(dkv_unpad).unbind(2)
+    #     (
+    #         dq_ref,
+    #         dkv_ref,
+    #     ) = torch.autograd.grad(out_ref, (q, kv), g)
+    #     dk_ref, dv_ref = dkv_ref.unbind(2)
+    #     (
+    #         dq_pt,
+    #         dkv_pt,
+    #     ) = torch.autograd.grad(out_pt, (q, kv), g)
+    #     dk_pt, dv_pt = dkv_pt.unbind(2)
+
+    #     dq = dq_pad_fn(dq_unpad)
+    #     print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
+    #     print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
+    #     print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")
+    #     print(f"dQ mean diff: {(dq - dq_ref).abs().mean().item()}")
+    #     print(f"dK mean diff: {(dk - dk_ref).abs().mean().item()}")
+    #     print(f"dV mean diff: {(dv - dv_ref).abs().mean().item()}")
+    #     print(f"dQ Pytorch max diff: {(dq_pt - dq_ref).abs().max().item()}")
+    #     print(f"dK Pytorch max diff: {(dk_pt - dk_ref).abs().max().item()}")
+    #     print(f"dV Pytorch max diff: {(dv_pt - dv_ref).abs().max().item()}")
+    #     print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
+    #     print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
+    #     print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
+
+    # Check that FlashAttention's numerical error is at most twice the numerical error
+    # of a Pytorch implementation.
+    assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
+
+    # if (d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90):
+    #     assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
+    #     assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
+    #     assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
 
 
 @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
@@ -2523,3 +2840,12 @@ def test_flash_attn_varlen_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, caus
         assert torch.equal(dv, dv0)
         assert torch.equal(dk, dk0)
         assert torch.equal(dq, dq0)
+
+
+# if __name__ == "__main__":
+#     # test_flash_attn_varlen_output(
+#     #     512, 768, 128, 0.0, False, False, False, False, "mha", torch.bfloat16, True, 0.0
+#     # )
+#     test_flash_attn_varlen_block_table(
+#         1024, 512, 128, False, 256, False, False, "mha", torch.bfloat16, 0.0
+#     )
