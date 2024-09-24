@@ -26,3 +26,8 @@ var/
 
 # Dev
 venv
+
+# benchmark results
+benchmarks/*.pdf
+benchmarks/*.plk
+benchmarks/*.ipynb
