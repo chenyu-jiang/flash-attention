@@ -73,10 +73,16 @@ inline __device__ void compute_dot_do_o(const Params &params) {
     const BlockInfo binfo(params, bidb);
     if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
 
-    const index_t row_offset_do = binfo.q_offset(params.do_batch_stride, params.do_row_stride, bidb)
-        + m_block * kBlockM * params.do_row_stride + bidh * params.do_head_stride;
-    const index_t row_offset_o = binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)
-        + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride;
+    const int *block_table_out = params.block_table_out == nullptr ? nullptr : params.block_table_out + bidb * params.block_table_batch_stride_out;
+    const int block_table_out_idx = block_table_out == nullptr ? 0 : m_block * kBlockM / params.page_block_size_out;
+    const int block_table_out_offset = block_table_out == nullptr ? 0 : m_block * kBlockM - block_table_out_idx * params.page_block_size_out;
+
+    const index_t row_offset_do = block_table_out == nullptr ? binfo.q_offset(params.do_batch_stride, params.do_row_stride, bidb)
+                                                               + m_block * kBlockM * params.do_row_stride + bidh * params.do_head_stride
+                                                             : block_table_out[block_table_out_idx] * params.do_batch_stride + block_table_out_offset * params.do_row_stride + bidh * params.o_head_stride;
+    const index_t row_offset_o = block_table_out == nullptr ? binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)
+                                                              + m_block * kBlockM * params.o_row_stride + bidh * params.o_head_stride
+                                                            : block_table_out[block_table_out_idx] * params.o_batch_stride + block_table_out_offset * params.o_row_stride + bidh * params.o_head_stride;
     const index_t row_offset_dq_accum = binfo.q_offset(params.seqlen_q_rounded * params.h * params.d_rounded, params.h * params.d_rounded, bidb)
         + (m_block * kBlockM + (params.cu_seqlens_q == nullptr ? 0 : 128 * bidb)) * params.h * params.d_rounded + bidh * params.d_rounded;
     // Regarding 128 * params.b see a comment in mha_varlen_bwd about padding of dq_accum and softmax_d
@@ -201,8 +207,13 @@ inline __device__ void convert_dQ(const Params &params, const int nsplits) {
     const BlockInfo binfo(params, bidb);
     if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
 
-    const index_t row_offset_dq = binfo.q_offset(params.dq_batch_stride, params.dq_row_stride, bidb)
-        + m_block * kBlockM * params.dq_row_stride + bidh * params.dq_head_stride;
+    const int *block_table_dq = params.block_table_dq == nullptr ? nullptr : params.block_table_dq + bidb * params.block_table_batch_stride_dq;
+    const int block_table_dq_idx = block_table_dq == nullptr ? 0 : m_block * kBlockM / params.page_block_size_dq;
+    const int block_table_dq_offset = block_table_dq == nullptr ? 0 : m_block * kBlockM - block_table_dq_idx * params.page_block_size_dq;
+
+    const index_t row_offset_dq = block_table_dq == nullptr ? binfo.q_offset(params.dq_batch_stride, params.dq_row_stride, bidb)
+                                                              + m_block * kBlockM * params.dq_row_stride + bidh * params.dq_head_stride
+                                                            : block_table_dq[block_table_dq_idx] * params.dq_batch_stride + block_table_dq_offset * params.dq_row_stride + bidh * params.dq_head_stride;
     const index_t row_offset_dq_accum = binfo.q_offset(params.seqlen_q_rounded * params.h * params.d_rounded, params.h * params.d_rounded, bidb)
         + (m_block * kBlockM + (params.cu_seqlens_q == nullptr ? 0 : 128 * bidb)) * params.h * params.d_rounded + bidh * params.d_rounded;
 

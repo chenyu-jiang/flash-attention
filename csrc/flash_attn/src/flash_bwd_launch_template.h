@@ -4,6 +4,8 @@
 
 #pragma once
 
+// #include <torch/torch.h>
+// #include <torch/cuda.h>
 #include <ATen/cuda/CUDAContext.h>
 
 #include "static_switch.h"
@@ -83,6 +85,10 @@ void run_flash_bwd_seqk_parallel(Flash_bwd_params &params, cudaStream_t stream) 
         flash_bwd_dot_do_o_kernel<false, Kernel_traits><<<grid_m, Kernel_traits::kNThreads, 0, stream>>>(params);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+    // torch::cuda::synchronize();
+    // auto dsoftmax_sum_tensor = torch::from_blob(params.dsoftmax_sum, {params.h, params.total_q + 128 * params.b}, torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA));
+    // std::cout << "dsoftmax_sum_tensor = " << dsoftmax_sum_tensor << std::endl;
 
     // We want to specialize to is_even_MN and not just is_even_M, since in the case where N is not
     // a multiple of kBlockN, we'll need to apply mask in the loop.

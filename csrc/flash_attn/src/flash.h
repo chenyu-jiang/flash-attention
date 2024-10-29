@@ -189,6 +189,15 @@ struct Flash_bwd_params : public Flash_fwd_params {
     index_t dk_head_stride;
     index_t dv_head_stride;
 
+    // block tables
+    int * __restrict__ block_table_dq;
+    index_t block_table_batch_stride_dq;
+    int page_block_size_dq;
+
+    int * __restrict__ block_table_dkv;
+    index_t block_table_batch_stride_dkv;
+    int page_block_size_dkv;
+
     // The pointer to the softmax d sum.
     void *__restrict__ dsoftmax_sum;
 

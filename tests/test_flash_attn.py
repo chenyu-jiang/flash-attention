@@ -1459,6 +1459,7 @@ def test_flash_attn_varlen_output(
 def _blockize_qkv_out(
     q_unpad: torch.Tensor,
     kv_unpad: torch.Tensor,
+    dout_unpad: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
     block_size_q: int,
@@ -1484,12 +1485,22 @@ def _blockize_qkv_out(
         q_block_mapping[cumsum_num_blocks_q[i]:cumsum_num_blocks_q[i + 1]]
         for i in range(len(n_blocks_per_seq_q))
     ]
+    dq_block_mapping = torch.tensor(np.random.choice(q_cache_size.item(), sum_num_blocks_q.item(), replace=False), device=q_unpad.device, dtype=torch.int32)
+    dq_block_table = [
+        dq_block_mapping[cumsum_num_blocks_q[i]:cumsum_num_blocks_q[i + 1]]
+        for i in range(len(n_blocks_per_seq_q))
+    ]
 
     kv_block_mapping = torch.tensor(np.random.choice(kv_cache_size.item(), sum_num_blocks_k.item(), replace=False), device=kv_unpad.device, dtype=torch.int32)
     cumsum_num_blocks_k = torch.concat([torch.zeros(1, device=n_blocks_per_seq_k.device, dtype=n_blocks_per_seq_k.dtype),
                                         n_blocks_per_seq_k.cumsum(0)], 0)
     kv_block_table = [
         kv_block_mapping[cumsum_num_blocks_k[i]:cumsum_num_blocks_k[i + 1]]
+        for i in range(len(n_blocks_per_seq_k))
+    ]
+    dkv_block_mapping = torch.tensor(np.random.choice(kv_cache_size.item(), sum_num_blocks_k.item(), replace=False), device=kv_unpad.device, dtype=torch.int32)
+    dkv_block_table = [
+        dkv_block_mapping[cumsum_num_blocks_k[i]:cumsum_num_blocks_k[i + 1]]
         for i in range(len(n_blocks_per_seq_k))
     ]
 
@@ -1516,10 +1527,21 @@ def _blockize_qkv_out(
             curr_kv_offset = kv_unpad_offset + block_idx * block_size_k
             curr_block_size = min(block_size_k, kv_unpad_max - curr_kv_offset)
             kv_cache[block_offset, :curr_block_size] = kv_unpad[curr_kv_offset:curr_kv_offset + curr_block_size]
+
+    dout_cache = torch.zeros(q_cache_size, block_size_q, dout_unpad.size(-2), dout_unpad.size(-1), device=dout_unpad.device, dtype=dout_unpad.dtype)
+    for i, blocks in enumerate(out_block_table):
+        dout_unpad_offset = cu_seqlens_q[i]
+        dout_unpad_max = cu_seqlens_q[i + 1]
+        for block_idx, block_offset in enumerate(blocks):
+            curr_dout_offset = dout_unpad_offset + block_idx * block_size_q
+            curr_block_size = min(block_size_q, dout_unpad_max - curr_dout_offset)
+            dout_cache[block_offset, :curr_block_size] = dout_unpad[curr_dout_offset:curr_dout_offset + curr_block_size]
     # dont need to fill out caches
     out_dtype = q_unpad.dtype
     out_cache = torch.zeros(q_cache_size, block_size_q, q_unpad.size(-2), q_unpad.size(-1), device=q_unpad.device, dtype=out_dtype)
     lse_cache = torch.zeros(q_unpad.size(-2), q_cache_size, block_size_q, device=q_unpad.device, dtype=torch.float)
+    dq_cache = torch.zeros(q_cache_size, block_size_q, q_unpad.size(-2), q_unpad.size(-1), device=q_unpad.device, dtype=q_unpad.dtype)
+    dkv_cache = torch.zeros(kv_cache_size, block_size_k, 2, kv_unpad.size(-2), kv_unpad.size(-1), device=kv_unpad.device, dtype=kv_unpad.dtype)
 
     # pad block table to max_num_blocks_per_seq
     q_block_table = torch.stack([torch.cat([block, torch.zeros(max_num_blocks_per_seq_q - len(block), device=block.device, dtype=block.dtype)])
@@ -1528,7 +1550,11 @@ def _blockize_qkv_out(
                         for block in kv_block_table])
     out_block_table = torch.stack([torch.cat([block, torch.zeros(max_num_blocks_per_seq_q - len(block), device=block.device, dtype=block.dtype)])
                         for block in out_block_table])
-    return q_block_table, kv_block_table, out_block_table, q_cache, kv_cache, out_cache, lse_cache
+    dq_block_table = torch.stack([torch.cat([block, torch.zeros(max_num_blocks_per_seq_q - len(block), device=block.device, dtype=block.dtype)])
+                        for block in dq_block_table])
+    dkv_block_table = torch.stack([torch.cat([block, torch.zeros(max_num_blocks_per_seq_k - len(block), device=block.device, dtype=block.dtype)])
+                        for block in dkv_block_table])
+    return q_block_table, kv_block_table, out_block_table, dq_block_table, dkv_block_table, q_cache, kv_cache, out_cache, lse_cache, dout_cache, dq_cache, dkv_cache
 
 def _reconstruct_blockized_out_lse(
     out_block_table: torch.Tensor,
@@ -1556,6 +1582,47 @@ def _reconstruct_blockized_out_lse(
             if curr_seq_q == q_seqlens_orig[i]:
                 break
     return out_unpad, sm_lse
+
+def _reconstruct_blockized_dq_dkv(
+    dq_block_table: torch.Tensor,
+    dkv_block_table: torch.Tensor,
+    dq_cache: torch.Tensor,
+    dkv_cache: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+):
+    # reverse cumsum to get the original seqlens
+    q_seqlens_orig = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    k_seqlens_orig = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+    block_size_q = dq_cache.size(1)
+    block_size_k = dkv_cache.size(1)
+    # dq_unpad = [total_q, num_heads, head_size]
+    dq_unpad = torch.zeros(cu_seqlens_q[-1], dq_cache.size(-2), dq_cache.size(-1), device=dq_cache.device, dtype=dq_cache.dtype)
+    # dkv_unpad = [total_k, num_heads, head_size]
+    dkv_unpad = torch.zeros(cu_seqlens_k[-1], 2, dkv_cache.size(-2), dkv_cache.size(-1), device=dkv_cache.device, dtype=dkv_cache.dtype)
+    curr_q = 0
+    for i, blocks in enumerate(dq_block_table):
+        curr_seq_q = 0
+        for block_idx, block in enumerate(blocks):
+            block = block.item()
+            curr_block_seqlen = min(block_size_q, q_seqlens_orig[i].item() - block_idx * block_size_q)
+            dq_unpad[curr_q:curr_q + curr_block_seqlen] = dq_cache[block, :curr_block_seqlen]
+            curr_q += curr_block_seqlen
+            curr_seq_q += curr_block_seqlen
+            if curr_seq_q == q_seqlens_orig[i]:
+                break
+    curr_k = 0
+    for i, blocks in enumerate(dkv_block_table):
+        curr_seq_k = 0
+        for block_idx, block in enumerate(blocks):
+            block = block.item()
+            curr_block_seqlen = min(block_size_k, k_seqlens_orig[i].item() - block_idx * block_size_k)
+            dkv_unpad[curr_k:curr_k + curr_block_seqlen] = dkv_cache[block, :curr_block_seqlen]
+            curr_k += curr_block_seqlen
+            curr_seq_k += curr_block_seqlen
+            if curr_seq_k == k_seqlens_orig[i]:
+                break
+    return dq_unpad, dkv_unpad
 
 @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
 # @pytest.mark.parametrize('dtype', [torch.float16])
@@ -1639,7 +1706,8 @@ def test_flash_attn_varlen_block_table(
         dq_pad_fn,
         dkv_pad_fn,
     ) = generate_qkv(q, *kv.unbind(dim=2), query_padding_mask, key_padding_mask, kvpacked=True)
-    q_block_table, kv_block_table, out_block_table, q_buffer, kv_buffer, out, lse = _blockize_qkv_out(q_unpad, kv_unpad, cu_seqlens_q, cu_seqlens_k, block_size, block_size)
+    dout_unpad = torch.randn_like(q_unpad)
+    q_block_table, kv_block_table, out_block_table, dq_block_table, dkv_block_table, q_buffer, kv_buffer, out, lse, dout_buffer, dq_buffer, dkv_buffer = _blockize_qkv_out(q_unpad, kv_unpad, dout_unpad, cu_seqlens_q, cu_seqlens_k, block_size, block_size)
     print("q_block_table: ", q_block_table.size())
     print("kv_block_table: ", kv_block_table.size())
     print("out_block_table: ", out_block_table.size())
@@ -1647,6 +1715,14 @@ def test_flash_attn_varlen_block_table(
     print("kv_buffer: ", kv_buffer.size())
     print("out: ", out.size())
     # blocked qkv and out
+    def _get_dq_block_table():
+        return dq_block_table
+    def _get_dkv_block_table():
+        return dkv_block_table
+    def _get_dq_buffer():
+        return dq_buffer
+    def _get_dkv_buffer():
+        return dkv_buffer
     out_blocked, sm_lse_blocked, _ = flash_attn_varlen_kvpacked_func(
         q_buffer,
         kv_buffer,
@@ -1664,8 +1740,12 @@ def test_flash_attn_varlen_block_table(
         q_block_table=q_block_table,
         kv_block_table=kv_block_table,
         out_block_table=out_block_table,
+        get_dq_block_table_=_get_dq_block_table,
+        get_dkv_block_table_=_get_dkv_block_table,
         out_=out,
         lse_=lse,
+        get_dq_=_get_dq_buffer,
+        get_dkv_=_get_dkv_buffer,
     )
     out_recon_blocked, sm_lse_recon_blocked = _reconstruct_blockized_out_lse(out_block_table, out_blocked, sm_lse_blocked, cu_seqlens_q)
     # unblocked qkv and out
@@ -1691,7 +1771,7 @@ def test_flash_attn_varlen_block_table(
     print(f"Sm LSE max diff blocked v.s. unblocked: {(sm_lse_recon_blocked - sm_lse).abs().max().item()}")
     print(f"Sm LSE mean diff blocked v.s. unblocked: {(sm_lse_recon_blocked - sm_lse).abs().mean().item()}")
 
-    out = output_pad_fn(out_recon_blocked)
+    recon_out = output_pad_fn(out_recon_blocked)
     dropout_mask = None
 
     out_ref, attn_ref = attention_kvpacked_ref(
@@ -1721,51 +1801,75 @@ def test_flash_attn_varlen_block_table(
         reorder_ops=True,
     )
 
-    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
+    print(f"Output max diff: {(recon_out - out_ref).abs().max().item()}")
+    print(f"Output mean diff: {(recon_out - out_ref).abs().mean().item()}")
     print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
     print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
 
-    # g = torch.randn_like(out)
-    # if ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90)):
-    #     (
-    #         dq_unpad,
-    #         dkv_unpad,
-    #     ) = torch.autograd.grad(out, (q_unpad, kv_unpad), g)
-    #     dk, dv = dkv_pad_fn(dkv_unpad).unbind(2)
-    #     (
-    #         dq_ref,
-    #         dkv_ref,
-    #     ) = torch.autograd.grad(out_ref, (q, kv), g)
-    #     dk_ref, dv_ref = dkv_ref.unbind(2)
-    #     (
-    #         dq_pt,
-    #         dkv_pt,
-    #     ) = torch.autograd.grad(out_pt, (q, kv), g)
-    #     dk_pt, dv_pt = dkv_pt.unbind(2)
+    # backward
+    # blocked
+    (
+        dq_cache,
+        dkv_cache,
+    ) = torch.autograd.grad(out_blocked, (q_buffer, kv_buffer), dout_buffer)
+    dq_recon, dkv_recon = _reconstruct_blockized_dq_dkv(dq_block_table, dkv_block_table, dq_cache, dkv_cache, cu_seqlens_q, cu_seqlens_k)
+    dq_recon = dq_pad_fn(dq_recon)
+    dk_recon, dv_recon = dkv_pad_fn(dkv_recon).unbind(2)
 
-    #     dq = dq_pad_fn(dq_unpad)
-    #     print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
-    #     print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
-    #     print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")
-    #     print(f"dQ mean diff: {(dq - dq_ref).abs().mean().item()}")
-    #     print(f"dK mean diff: {(dk - dk_ref).abs().mean().item()}")
-    #     print(f"dV mean diff: {(dv - dv_ref).abs().mean().item()}")
-    #     print(f"dQ Pytorch max diff: {(dq_pt - dq_ref).abs().max().item()}")
-    #     print(f"dK Pytorch max diff: {(dk_pt - dk_ref).abs().max().item()}")
-    #     print(f"dV Pytorch max diff: {(dv_pt - dv_ref).abs().max().item()}")
-    #     print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
-    #     print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
-    #     print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
+    torch.cuda.synchronize()
+    print("Unblocked BW Finished.")
+    # unblocked
+    (
+        dq_unpad,
+        dkv_unpad,
+    ) = torch.autograd.grad(out_unpad, (q_unpad, kv_unpad), dout_unpad)
+    dq = dq_pad_fn(dq_unpad)
+    dk, dv = dkv_pad_fn(dkv_unpad).unbind(2)
+
+    # ref
+    dout_padded = output_pad_fn(dout_unpad)
+    (
+        dq_ref,
+        dkv_ref,
+    ) = torch.autograd.grad(out_ref, (q, kv), dout_padded)
+    dk_ref, dv_ref = dkv_ref.unbind(2)
+    (
+        dq_pt,
+        dkv_pt,
+    ) = torch.autograd.grad(out_pt, (q, kv), dout_padded)
+    dk_pt, dv_pt = dkv_pt.unbind(2)
+
+    print("============= blocked v.s. unblocked =============")
+    print(f"dQ max diff: {(dq - dq_recon).abs().max().item()}")
+    print(f"dK max diff: {(dk - dk_recon).abs().max().item()}")
+    print(f"dV max diff: {(dv - dv_recon).abs().max().item()}")
+    print(f"dQ mean diff: {(dq - dq_recon).abs().mean().item()}")
+    print(f"dK mean diff: {(dk - dk_recon).abs().mean().item()}")
+    print(f"dV mean diff: {(dv - dv_recon).abs().mean().item()}")
+
+    print("============= unblocked v.s. reference =============")
+    print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
+    print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
+    print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")
+    print(f"dQ mean diff: {(dq - dq_ref).abs().mean().item()}")
+    print(f"dK mean diff: {(dk - dk_ref).abs().mean().item()}")
+    print(f"dV mean diff: {(dv - dv_ref).abs().mean().item()}")
+
+    print("============= pytorch v.s. reference =============")
+    print(f"dQ Pytorch max diff: {(dq_pt - dq_ref).abs().max().item()}")
+    print(f"dK Pytorch max diff: {(dk_pt - dk_ref).abs().max().item()}")
+    print(f"dV Pytorch max diff: {(dv_pt - dv_ref).abs().max().item()}")
+    print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
+    print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
+    print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.
     assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
 
-    # if (d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90):
-    #     assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
-    #     assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
-    #     assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
+    assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
+    assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
+    assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
 
 
 @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
@@ -2842,10 +2946,10 @@ def test_flash_attn_varlen_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, caus
         assert torch.equal(dq, dq0)
 
 
-# if __name__ == "__main__":
-#     # test_flash_attn_varlen_output(
-#     #     512, 768, 128, 0.0, False, False, False, False, "mha", torch.bfloat16, True, 0.0
-#     # )
-#     test_flash_attn_varlen_block_table(
-#         1024, 512, 128, False, 256, False, False, "mha", torch.bfloat16, 0.0
-#     )
+if __name__ == "__main__":
+    # test_flash_attn_varlen_output(
+    #     512, 768, 128, 0.0, False, False, False, False, "mha", torch.bfloat16, True, 0.0
+    # )
+    test_flash_attn_varlen_block_table(
+        2048, 1024, 64, False, 256, False, False, "mha", torch.bfloat16, 0.0
+    )

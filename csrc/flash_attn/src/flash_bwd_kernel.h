@@ -104,23 +104,47 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         m_block_max = std::min(m_block_max, cute::ceil_div((n_block + 1) * kBlockN + binfo.actual_seqlen_q - binfo.actual_seqlen_k + params.window_size_left, kBlockM));
     }
 
-    const index_t row_offset_q = binfo.q_offset(params.q_batch_stride, params.q_row_stride, bidb)
-        + (m_block_max - 1) * kBlockM * params.q_row_stride + bidh * params.q_head_stride;
-    const index_t row_offset_k = binfo.k_offset(params.k_batch_stride, params.k_row_stride, bidb)
-        + n_block * kBlockN * params.k_row_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
-    const index_t row_offset_v = binfo.k_offset(params.v_batch_stride, params.v_row_stride, bidb)
-        + n_block * kBlockN * params.v_row_stride + (bidh / params.h_h_k_ratio) * params.v_head_stride;
-    const index_t row_offset_do = binfo.q_offset(params.do_batch_stride, params.do_row_stride, bidb)
-        + (m_block_max - 1) * kBlockM * params.do_row_stride + bidh * params.do_head_stride;
-    const index_t row_offset_o = binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)
-        + (m_block_max - 1) * kBlockM * params.o_row_stride + bidh * params.o_head_stride;
-    const index_t row_offset_dq = binfo.q_offset(params.dq_batch_stride, params.dq_row_stride, bidb)
-        + (m_block_max - 1) * kBlockM * params.dq_row_stride + bidh * params.dq_head_stride;
+    const int *block_table_q = params.block_table_q == nullptr ? nullptr : params.block_table_q + bidb * params.block_table_batch_stride_q;
+    const int block_table_q_idx = block_table_q == nullptr ? 0 : (m_block_max - 1) * kBlockM / params.page_block_size_q;
+    const int block_table_q_offset = block_table_q == nullptr ? 0 : (m_block_max - 1) * kBlockM - block_table_q_idx * params.page_block_size_q;
+
+    const int *block_table_kv = params.block_table_kv == nullptr ? nullptr : params.block_table_kv + bidb * params.block_table_batch_stride_kv;
+    const int block_table_kv_idx = block_table_kv == nullptr ? 0 : n_block * kBlockN / params.page_block_size_kv;
+    const int block_table_kv_offset = block_table_kv == nullptr ? 0 : n_block * kBlockN - block_table_kv_idx * params.page_block_size_kv;
+
+    // o, do and lse share the same block table
+    const int *block_table_o = params.block_table_out == nullptr ? nullptr : params.block_table_out + bidb * params.block_table_batch_stride_out;
+    const int block_table_o_idx = block_table_o == nullptr ? 0 : (m_block_max - 1) * kBlockM / params.page_block_size_out;
+    const int block_table_o_offset = block_table_o == nullptr ? 0 : (m_block_max - 1) * kBlockM - block_table_o_idx * params.page_block_size_out;
+
+    const int *block_table_dq = params.block_table_dq == nullptr ? nullptr : params.block_table_dq + bidb * params.block_table_batch_stride_dq;
+    const int block_table_dq_idx = block_table_dq == nullptr ? 0 : (m_block_max - 1) * kBlockM / params.page_block_size_dq;
+    const int block_table_dq_offset = block_table_dq == nullptr ? 0 : (m_block_max - 1) * kBlockM - block_table_dq_idx * params.page_block_size_dq;
+
+    const index_t row_offset_q = block_table_q == nullptr ? binfo.q_offset(params.q_batch_stride, params.q_row_stride, bidb)
+                                                            + (m_block_max - 1) * kBlockM * params.q_row_stride + bidh * params.q_head_stride
+                                                          : block_table_q[block_table_q_idx] * params.q_batch_stride + block_table_q_offset * params.q_row_stride + bidh * params.q_head_stride;
+    const index_t row_offset_k = block_table_kv == nullptr ? binfo.k_offset(params.k_batch_stride, params.k_row_stride, bidb)
+                                                             + n_block * kBlockN * params.k_row_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride
+                                                           : block_table_kv[block_table_kv_idx] * params.k_batch_stride + block_table_kv_offset * params.k_row_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
+    const index_t row_offset_v = block_table_kv == nullptr ? binfo.k_offset(params.v_batch_stride, params.v_row_stride, bidb)
+                                                             + n_block * kBlockN * params.v_row_stride + (bidh / params.h_h_k_ratio) * params.v_head_stride
+                                                           : block_table_kv[block_table_kv_idx] * params.v_batch_stride + block_table_kv_offset * params.v_row_stride + (bidh / params.h_h_k_ratio) * params.v_head_stride;
+    const index_t row_offset_do = block_table_o == nullptr ? binfo.q_offset(params.do_batch_stride, params.do_row_stride, bidb)
+                                                             + (m_block_max - 1) * kBlockM * params.do_row_stride + bidh * params.do_head_stride
+                                                           : block_table_o[block_table_o_idx] * params.do_batch_stride + block_table_o_offset * params.do_row_stride + bidh * params.do_head_stride;
+    const index_t row_offset_o = block_table_o == nullptr ? binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)
+                                                            + (m_block_max - 1) * kBlockM * params.o_row_stride + bidh * params.o_head_stride
+                                                          : block_table_o[block_table_o_idx] * params.o_batch_stride + block_table_o_offset * params.o_row_stride + bidh * params.o_head_stride;
+    const index_t row_offset_dq = block_table_dq == nullptr ? binfo.q_offset(params.dq_batch_stride, params.dq_row_stride, bidb)
+                                                              + (m_block_max - 1) * kBlockM * params.dq_row_stride + bidh * params.dq_head_stride
+                                                            : block_table_dq[block_table_dq_idx] * params.dq_batch_stride + block_table_dq_offset * params.dq_row_stride + bidh * params.dq_head_stride;
     const index_t row_offset_dq_accum = binfo.q_offset(params.seqlen_q_rounded * params.h * params.d_rounded, params.h * params.d_rounded, bidb)
         + ((m_block_max - 1) * kBlockM + (params.cu_seqlens_q == nullptr ? 0 : 128 * bidb)) * params.h * params.d_rounded + bidh * params.d_rounded
         // If deterministic, each thread block will do atomicAdd to a different dQ_accum buffer.
         + (!params.deterministic ? 0 : blockIdx.x * params.dq_accum_split_stride);
-    const index_t row_offset_lse = (params.unpadded_lse? bidh * params.total_q + binfo.q_offset(params.seqlen_q, 1, bidb): (bidb * params.h + bidh) * params.seqlen_q) + (m_block_max - 1) * kBlockM;
+    const index_t row_offset_lse = block_table_o == nullptr ? (params.unpadded_lse? bidh * params.total_q + binfo.q_offset(params.seqlen_q, 1, bidb): (bidb * params.h + bidh) * params.seqlen_q) + (m_block_max - 1) * kBlockM
+                                                            : (params.num_page_blocks_out * params.page_block_size_out * bidh) + (block_table_o[block_table_o_idx] * params.page_block_size_out + block_table_o_offset);
     // Regarding 128 * params.b see a comment in mha_varlen_bwd about padding of dq_accum and softmax_d
     const index_t row_offset_dpsum = (params.unpadded_lse? bidh * (params.total_q + 128 * params.b) + binfo.q_offset(params.seqlen_q_rounded, 1, bidb) + 128 * bidb: (bidb * params.h + bidh) * params.seqlen_q_rounded) + (m_block_max - 1) * kBlockM;
 
@@ -308,7 +332,17 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     // Prologue
 
     // We'll advance gdQ and gdQaccum before the 1st read/write.
-    tdQgdQ.data() = tdQgdQ.data() + kBlockM * params.dq_row_stride;
+    if (block_table_dq == nullptr) {
+        tdQgdQ.data() = tdQgdQ.data() + kBlockM * params.dq_row_stride;
+    } else {
+        const int block_table_idx_cur = (m_block_max - 1) * kBlockM / params.page_block_size_dq;
+        const int block_table_offset_cur = (m_block_max - 1) * kBlockM - block_table_idx_cur * params.page_block_size_dq;
+        const int block_table_idx_next = m_block_max * kBlockM / params.page_block_size_dq;
+        const int block_table_offset_next = m_block_max * kBlockN - block_table_idx_next * params.page_block_size_dq;
+        const int table_diff = block_table_dq[block_table_idx_next] - block_table_dq[block_table_idx_cur];
+        const int offset_diff = block_table_offset_next - block_table_offset_cur;
+        tdQgdQ.data() = tdQgdQ.data() + table_diff * params.dq_batch_stride + offset_diff * params.dq_row_stride;
+    }
     tdQgdQaccum.data() = tdQgdQaccum.data() + kBlockM * params.h * params.d_rounded;
 
     int m_block = m_block_max - 1;
@@ -328,10 +362,16 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     // And we might read OOB elements from gQ and gdO.
     // This also covers the case where actual_seqlen_q == 0
     if ((Is_local || !Is_even_MN) && m_block < m_block_min) {
-        const index_t row_offset_dk = binfo.k_offset(params.dk_batch_stride, params.dk_row_stride, bidb)
-          + n_block * kBlockN * params.dk_row_stride + bidh * params.dk_head_stride;
-        const index_t row_offset_dv = binfo.k_offset(params.dv_batch_stride, params.dv_row_stride, bidb)
-          + n_block * kBlockN * params.dv_row_stride + bidh * params.dv_head_stride;
+        const int *block_table_dkv = params.block_table_dkv == nullptr ? nullptr : params.block_table_dkv + bidb * params.block_table_batch_stride_dkv;
+        const int block_table_dkv_idx = block_table_dkv == nullptr ? 0 : n_block * kBlockN / params.page_block_size_dkv;
+        const int block_table_dkv_offset = block_table_dkv == nullptr ? 0 : n_block * kBlockN - block_table_dkv_idx * params.page_block_size_dkv;
+
+        const index_t row_offset_dk = block_table_dkv == nullptr ? binfo.k_offset(params.dk_batch_stride, params.dk_row_stride, bidb)
+                                                                   + n_block * kBlockN * params.dk_row_stride + bidh * params.dk_head_stride
+                                                                 : block_table_dkv[block_table_dkv_idx] * params.dk_batch_stride + block_table_dkv_offset * params.dk_row_stride + bidh * params.dk_head_stride;
+        const index_t row_offset_dv = block_table_dkv == nullptr ? binfo.k_offset(params.dv_batch_stride, params.dv_row_stride, bidb)
+                                                                   + n_block * kBlockN * params.dv_row_stride + bidh * params.dv_head_stride
+                                                                 : block_table_dkv[block_table_dkv_idx] * params.dv_batch_stride + block_table_dkv_offset * params.dv_row_stride + bidh * params.dv_head_stride;
         Tensor gdK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.dk_ptr) + row_offset_dk),
                                  Shape<Int<kBlockN>, Int<kHeadDim>>{},
                                  make_stride(params.dk_row_stride, _1{}));
@@ -611,7 +651,17 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
             tQsQ.data() = tQsQ.data() + sQ_offset;
             tSsQ.data() = tSsQ.data() + sQ_offset;
             // Advance gQ
-            tQgQ.data() = tQgQ.data() + (-int(kBlockM * params.q_row_stride));
+            if (block_table_q == nullptr) {
+                tQgQ.data() = tQgQ.data() + (-int(kBlockM * params.q_row_stride));
+            } else {
+                const int block_table_idx_cur = m_block * kBlockM / params.page_block_size_q;
+                const int block_table_offset_cur = m_block * kBlockM - block_table_idx_cur * params.page_block_size_q;
+                const int block_table_idx_next = (m_block - 1) * kBlockM / params.page_block_size_q;
+                const int block_table_offset_next = (m_block - 1) * kBlockM - block_table_idx_next * params.page_block_size_q;
+                const int table_diff = block_table_q[block_table_idx_next] - block_table_q[block_table_idx_cur];
+                const int offset_diff = block_table_offset_next - block_table_offset_cur;
+                tQgQ.data() = tQgQ.data() + table_diff * params.q_batch_stride + offset_diff * params.q_row_stride;
+            }
             flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tQgQ, tQsQ, tQcQ, tQpQ);
             flash::cp_async_fence();
         }
@@ -638,9 +688,29 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
 
         if (m_block > m_block_min) {
             // Advance gdO
-            tdOgdO.data() = tdOgdO.data() + (-int(kBlockM * params.do_row_stride));
+            if (block_table_o == nullptr) {
+                tdOgdO.data() = tdOgdO.data() + (-int(kBlockM * params.do_row_stride));
+            } else {
+                const int block_table_idx_cur = m_block * kBlockM / params.page_block_size_out;
+                const int block_table_offset_cur = m_block * kBlockM - block_table_idx_cur * params.page_block_size_out;
+                const int block_table_idx_next = (m_block - 1) * kBlockM / params.page_block_size_out;
+                const int block_table_offset_next = (m_block - 1) * kBlockM - block_table_idx_next * params.page_block_size_out;
+                const int table_diff = block_table_o[block_table_idx_next] - block_table_o[block_table_idx_cur];
+                const int offset_diff = block_table_offset_next - block_table_offset_cur;
+                tdOgdO.data() = tdOgdO.data() + table_diff * params.do_batch_stride + offset_diff * params.do_row_stride;
+            }
             if (Is_first) {
-                tdOgO.data() = tdOgO.data() + (-int(kBlockM * params.o_row_stride));
+                if (block_table_o == nullptr) {
+                    tdOgO.data() = tdOgO.data() + (-int(kBlockM * params.o_row_stride));
+                } else {
+                    const int block_table_idx_cur = m_block * kBlockM / params.page_block_size_out;
+                    const int block_table_offset_cur = m_block * kBlockM - block_table_idx_cur * params.page_block_size_out;
+                    const int block_table_idx_next = (m_block - 1) * kBlockM / params.page_block_size_out;
+                    const int block_table_offset_next = (m_block - 1) * kBlockM - block_table_idx_next * params.page_block_size_out;
+                    const int table_diff = block_table_o[block_table_idx_next] - block_table_o[block_table_idx_cur];
+                    const int offset_diff = block_table_offset_next - block_table_offset_cur;
+                    tdOgO.data() = tdOgO.data() + table_diff * params.o_batch_stride + offset_diff * params.o_row_stride;
+                }
                 flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_dO, tdOgdO, tdOrdO, tQcQ, tQpQ);
                 flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_dO, tdOgO, tdOrO, tQcQ, tQpQ);
             } else {
@@ -654,7 +724,17 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         // if (cute::thread0()) { print(acc_dq); }
 
         if (m_block > m_block_min) {
-            gLSE.data() = gLSE.data() + (-int(kBlockM));
+            if (block_table_o == nullptr) {
+                gLSE.data() = gLSE.data() + (-int(kBlockM));
+            } else {
+                const int block_table_idx_cur = m_block * kBlockM / params.page_block_size_out;
+                const int block_table_offset_cur = m_block * kBlockM - block_table_idx_cur * params.page_block_size_out;
+                const int block_table_idx_next = (m_block - 1) * kBlockM / params.page_block_size_out;
+                const int block_table_offset_next = (m_block - 1) * kBlockM - block_table_idx_next * params.page_block_size_out;
+                const int table_diff = block_table_o[block_table_idx_next] - block_table_o[block_table_idx_cur];
+                const int offset_diff = block_table_offset_next - block_table_offset_cur;
+                gLSE.data() = gLSE.data() + table_diff * params.page_block_size_out + offset_diff;
+            }
             #pragma unroll
             for (int mi = 0; mi < size(lse); ++mi) { lse(mi) = gLSE(get<0>(taccScS_row(mi))); }
             gdPsum.data() = gdPsum.data() + (-int(kBlockM));
@@ -692,7 +772,17 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         if (!Double_buffer && m_block > m_block_min) {
             __syncthreads();
             // Advance gQ
-            tQgQ.data() = tQgQ.data() + (-int(kBlockM * params.q_row_stride));
+            if (block_table_q == nullptr) {
+                tQgQ.data() = tQgQ.data() + (-int(kBlockM * params.q_row_stride));
+            } else {
+                const int block_table_idx_cur = m_block * kBlockM / params.page_block_size_q;
+                const int block_table_offset_cur = m_block * kBlockM - block_table_idx_cur * params.page_block_size_q;
+                const int block_table_idx_next = (m_block - 1) * kBlockM / params.page_block_size_q;
+                const int block_table_offset_next = (m_block - 1) * kBlockM - block_table_idx_next * params.page_block_size_q;
+                const int table_diff = block_table_q[block_table_idx_next] - block_table_q[block_table_idx_cur];
+                const int offset_diff = block_table_offset_next - block_table_offset_cur;
+                tQgQ.data() = tQgQ.data() + table_diff * params.q_batch_stride + offset_diff * params.q_row_stride;
+            }
             flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tQgQ, tQsQ, tQcQ, tQpQ);
             flash::cp_async_fence();
         }
@@ -707,7 +797,17 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
             __syncthreads();
             Tensor tdQrdQ = make_tensor<Element>(shape(tdQgdQ));
             cute::copy(gmem_tiled_copy_dQ, tdQsdQ, tdQrdQ);
-            tdQgdQ.data() = tdQgdQ.data() + (-int(kBlockM * params.dq_row_stride));
+            if (block_table_dq == nullptr) {
+                tdQgdQ.data() = tdQgdQ.data() + (-int(kBlockM * params.dq_row_stride));
+            } else {
+                const int block_table_idx_cur = (m_block + 1) * kBlockM / params.page_block_size_q;
+                const int block_table_offset_cur = (m_block + 1) * kBlockM - block_table_idx_cur * params.page_block_size_q;
+                const int block_table_idx_next = m_block * kBlockM / params.page_block_size_q;
+                const int block_table_offset_next = m_block * kBlockM - block_table_idx_next * params.page_block_size_q;
+                const int table_diff = block_table_dq[block_table_idx_next] - block_table_dq[block_table_idx_cur];
+                const int offset_diff = block_table_offset_next - block_table_offset_cur;
+                tdQgdQ.data() = tdQgdQ.data() + table_diff * params.dq_batch_stride + offset_diff * params.dq_row_stride;
+            }
             Tensor cdQ = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDim>>{});    // (BLK_M,BLK_K) -> (blk_m,blk_k)
             Tensor tdQcdQ = gmem_thr_copy_dQ.partition_D(cdQ);
             #pragma unroll
@@ -753,10 +853,16 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
     cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
 
-    const index_t row_offset_dk = binfo.k_offset(params.dk_batch_stride, params.dk_row_stride, bidb)
-       + n_block * kBlockN * params.dk_row_stride + bidh * params.dk_head_stride;
-    const index_t row_offset_dv = binfo.k_offset(params.dv_batch_stride, params.dv_row_stride, bidb)
-       + n_block * kBlockN * params.dv_row_stride + bidh * params.dv_head_stride;
+    const int *block_table_dkv = params.block_table_dkv == nullptr ? nullptr : params.block_table_dkv + bidb * params.block_table_batch_stride_dkv;
+    const int block_table_dkv_idx = block_table_dkv == nullptr ? 0 : n_block * kBlockN / params.page_block_size_dkv;
+    const int block_table_dkv_offset = block_table_dkv == nullptr ? 0 : n_block * kBlockN - block_table_dkv_idx * params.page_block_size_dkv;
+
+    const index_t row_offset_dk = block_table_dkv == nullptr ? binfo.k_offset(params.dk_batch_stride, params.dk_row_stride, bidb)
+                                                              + n_block * kBlockN * params.dk_row_stride + bidh * params.dk_head_stride
+                                                            : block_table_dkv[block_table_dkv_idx] * params.dk_batch_stride + block_table_dkv_offset * params.dk_row_stride + bidh * params.dk_head_stride;
+    const index_t row_offset_dv = block_table_dkv == nullptr ? binfo.k_offset(params.dv_batch_stride, params.dv_row_stride, bidb)
+                                                            + n_block * kBlockN * params.dv_row_stride + bidh * params.dv_head_stride
+                                                            : block_table_dkv[block_table_dkv_idx] * params.dv_batch_stride + block_table_dkv_offset * params.dv_row_stride + bidh * params.dv_head_stride;
     Tensor gdK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.dk_ptr) + row_offset_dk),
                              Shape<Int<kBlockN>, Int<kHeadDim>>{},
                              make_stride(params.dk_row_stride, _1{}));

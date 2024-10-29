@@ -519,7 +519,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                const at::Tensor &k,  // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
                const at::Tensor &v,  // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
                c10::optional<at::Tensor> &out_, // total_q x num_heads x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
-               c10::optional<at::Tensor> &lse_, // num_heads x total_q, total_q := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads if there's a block_table.
+               c10::optional<at::Tensor> &lse_, // num_heads x total_q, total_q := \sum_{i=0}^{b} s_i or num_heads x num_blocks x page_block_size if there's a block_table.
                const at::Tensor &cu_seqlens_q,  // b+1
                const at::Tensor &cu_seqlens_k,  // b+1
                c10::optional<at::Tensor> &seqused_k, // b. If given, only this many elements of each batch element's keys are used.
@@ -765,16 +765,22 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         params.block_table_batch_stride_kv = block_table_kv.stride(0);
         params.k_batch_stride = k.stride(0);
         params.v_batch_stride = v.stride(0);
+    } else {
+        params.block_table_kv = nullptr;
     }
     if (paged_Q) {
         params.block_table_q = block_table_q.data_ptr<int>();
         params.block_table_batch_stride_q = block_table_q.stride(0);
         params.q_batch_stride = q.stride(0);
+    } else {
+        params.block_table_q = nullptr;
     }
     if (paged_Out) {
         params.block_table_out = block_table_out.data_ptr<int>();
         params.block_table_batch_stride_out = block_table_out.stride(0);
         params.o_batch_stride = out.stride(0);
+    } else {
+        params.block_table_out = nullptr;
     }
     params.page_block_size_q = page_block_size_q;
     params.page_block_size_kv = page_block_size_kv;
@@ -1069,17 +1075,22 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x multipl
 }
 
 std::vector<at::Tensor>
-mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
-               const at::Tensor &q,   // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
-               const at::Tensor &k,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i
-               const at::Tensor &v,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i
-               const at::Tensor &out,   // total_q x num_heads x head_size
-               const at::Tensor &softmax_lse,    // h x total_q, softmax logsumexp
-               c10::optional<at::Tensor> &dq_,   // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
-               c10::optional<at::Tensor> &dk_,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i
-               c10::optional<at::Tensor> &dv_,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i
+mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size or num_blocks x page_block_size x num_heads x head_size if there's a block_table.
+               const at::Tensor &q,   // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size if there's a block_table.
+               const at::Tensor &k,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size_k if there's a block_table.
+               const at::Tensor &v,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size_k if there's a block_table.
+               const at::Tensor &out,   // total_q x num_heads x head_size or num_blocks x page_block_size x num_heads x head_size if there's a block_table.
+               const at::Tensor &softmax_lse,    // h x total_q, softmax logsumexp or h x num_blocks x page_block_size if there's a block_table.
+               c10::optional<at::Tensor> &dq_,   // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size if there's a block_table.
+               c10::optional<at::Tensor> &dk_,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size_k if there's a block_table.
+               c10::optional<at::Tensor> &dv_,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size_k if there's a block_table.
                const at::Tensor &cu_seqlens_q,  // b+1
                const at::Tensor &cu_seqlens_k,  // b+1
+               c10::optional<at::Tensor> &block_table_q_,  // b x max_num_blocks_per_seq_q
+               c10::optional<at::Tensor> &block_table_kv_,  // b x max_num_blocks_per_seq_kv
+               c10::optional<at::Tensor> &block_table_out_,  // b x max_num_blocks_per_seq_out
+               c10::optional<at::Tensor> &block_table_dq_,  // b x max_num_blocks_per_seq_q
+               c10::optional<at::Tensor> &block_table_dkv_,  // b x max_num_blocks_per_seq_kv
                c10::optional<at::Tensor> &alibi_slopes_, // num_heads or b x num_heads
                const int max_seqlen_q,
                const int max_seqlen_k,          // max sequence length to choose the kernel
@@ -1135,14 +1146,62 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
     CHECK_CONTIGUOUS(cu_seqlens_q);
     CHECK_CONTIGUOUS(cu_seqlens_k);
 
+    at::Tensor block_table_q;
+    at::Tensor block_table_kv;
+    at::Tensor block_table_out;
+    at::Tensor block_table_dq;
+    at::Tensor block_table_dkv;
+    const bool paged_Q = block_table_q_.has_value();
+    const bool paged_KV = block_table_kv_.has_value();
+    const bool paged_Out = block_table_out_.has_value();
+    const bool paged_dQ = block_table_dq_.has_value();
+    const bool paged_dKV = block_table_dkv_.has_value();
+    if (paged_Q) {
+        block_table_q = block_table_q_.value();
+        TORCH_CHECK(block_table_q.dtype() == torch::kInt32, "block_table_q must have dtype int32");
+        CHECK_DEVICE(block_table_q);
+        CHECK_CONTIGUOUS(block_table_q);
+    }
+    if (paged_KV) {
+        block_table_kv = block_table_kv_.value();
+        TORCH_CHECK(block_table_kv.dtype() == torch::kInt32, "block_table_kv must have dtype int32");
+        CHECK_DEVICE(block_table_kv);
+        CHECK_CONTIGUOUS(block_table_kv);
+    }
+    if (paged_Out) {
+        block_table_out = block_table_out_.value();
+        TORCH_CHECK(block_table_out.dtype() == torch::kInt32, "block_table_out must have dtype int32");
+        CHECK_DEVICE(block_table_out);
+        CHECK_CONTIGUOUS(block_table_out);
+    }
+    if (paged_dQ) {
+        block_table_dq = block_table_dq_.value();
+        TORCH_CHECK(block_table_dq.dtype() == torch::kInt32, "block_table_dq must have dtype int32");
+        CHECK_DEVICE(block_table_dq);
+        CHECK_CONTIGUOUS(block_table_dq);
+        TORCH_CHECK(dq_.has_value(), "block_table_dq is provided but dq is not");
+    }
+    if (paged_dKV) {
+        block_table_dkv = block_table_dkv_.value();
+        TORCH_CHECK(block_table_dkv.dtype() == torch::kInt32, "block_table_dkv must have dtype int32");
+        CHECK_DEVICE(block_table_dkv);
+        CHECK_CONTIGUOUS(block_table_dkv);
+        TORCH_CHECK(dk_.has_value(), "block_table_dkv is provided but dk is not");
+        TORCH_CHECK(dv_.has_value(), "block_table_dkv is provided but dv is not");
+    }
+
+
     const auto sizes = q.sizes();
 
-    const int total_q = sizes[0];
     const int batch_size = cu_seqlens_q.numel() - 1;
-    const int num_heads = sizes[1];
-    const int head_size = sizes[2];
-    const int total_k = k.size(0);
-    const int num_heads_k = k.size(1);
+    const int total_q = paged_Q ? cu_seqlens_q[batch_size].item<int>() : sizes[0];
+    const int num_heads = paged_Q ? sizes[2] : sizes[1];
+    const int head_size = paged_Q ? sizes[3] : sizes[2];
+    const int total_k = paged_KV ? cu_seqlens_k[batch_size].item<int>() : k.size(0);
+    const int num_heads_k = paged_KV ? k.size(2) : k.size(1);
+    if (paged_Q || paged_KV || paged_Out || paged_dQ || paged_dKV) {
+        TORCH_CHECK(num_heads_k == num_heads, "MHA/MQA is not currently implemented in paged backward.");
+    }
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
     TORCH_CHECK(head_size <= 256, "FlashAttention backward only supports head dimension at most 256");
@@ -1152,6 +1211,27 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
     if (softcap > 0.f) { TORCH_CHECK(p_dropout == 0.f, "Softcapping does not support dropout for now"); }
 
+    const int max_num_blocks_per_seq_q = !paged_Q ? 0 : block_table_q.size(1);
+    const int max_num_blocks_per_seq_kv = !paged_KV ? 0 : block_table_kv.size(1);
+    const int max_num_blocks_per_seq_out = !paged_Out ? 0 : block_table_out.size(1);
+    const int max_num_blocks_per_seq_dq = !paged_dQ ? 0 : block_table_dq.size(1);
+    const int max_num_blocks_per_seq_dkv = !paged_dKV ? 0 : block_table_dkv.size(1);
+    const int num_blocks_q = !paged_Q ? 0 : q.size(0);
+    const int page_block_size_q = !paged_Q ? 1 : q.size(1);
+    const int num_blocks_kv = !paged_KV ? 0 : k.size(0);
+    const int page_block_size_kv = !paged_KV ? 1 : k.size(1);
+    const int num_blocks_out = !paged_Out ? 0 : out.size(0);
+    const int page_block_size_out = !paged_Out ? 1 : out.size(1);
+    const int num_blocks_dq = !paged_dQ ? 0 : dq_.value().size(0);
+    const int page_block_size_dq = !paged_dQ ? 1 : dq_.value().size(1);
+    const int num_blocks_dkv = !paged_dKV ? 0 : dk_.value().size(0);
+    const int page_block_size_dkv = !paged_dKV ? 1 : dk_.value().size(1);
+    TORCH_CHECK(!paged_KV || page_block_size_kv % 128 == 0, "Paged KV cache block size must be divisible by 128");
+    TORCH_CHECK(!paged_Q || page_block_size_q % 128 == 0, "Paged Q cache block size must be divisible by 128");
+    TORCH_CHECK(!paged_Out || page_block_size_out % 128 == 0, "Paged Out cache block size must be divisible by 128");
+    TORCH_CHECK(!paged_dQ || page_block_size_dq % 128 == 0, "Paged dQ cache block size must be divisible by 128");
+    TORCH_CHECK(!paged_dKV || page_block_size_dkv % 128 == 0, "Paged dKV cache block size must be divisible by 128");
+
     auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
     const int head_size_rounded = head_size <= 192 ? round_multiple(head_size, 32) : 256;
     const int seqlen_q_rounded = round_multiple(max_seqlen_q, 128);
@@ -1160,11 +1240,27 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
     if (window_size_left >= max_seqlen_k) { window_size_left = -1; }
     if (window_size_right >= max_seqlen_k) { window_size_right = -1; }
 
-    CHECK_SHAPE(q, total_q, num_heads, head_size);
-    CHECK_SHAPE(k, total_k, num_heads_k, head_size);
-    CHECK_SHAPE(v, total_k, num_heads_k, head_size);
-    CHECK_SHAPE(out, total_q, num_heads, head_size);
-    CHECK_SHAPE(dout, total_q, num_heads, head_size);
+    if (!paged_Q) {
+        CHECK_SHAPE(q, total_q, num_heads, head_size);
+    } else {
+        CHECK_SHAPE(q, num_blocks_q, page_block_size_q, num_heads, head_size);
+        CHECK_SHAPE(block_table_q, batch_size, max_num_blocks_per_seq_q);
+    }
+    if (!paged_KV) {
+        CHECK_SHAPE(k, total_k, num_heads_k, head_size);
+        CHECK_SHAPE(v, total_k, num_heads_k, head_size);
+    } else {
+        CHECK_SHAPE(k, num_blocks_kv, page_block_size_kv, num_heads_k, head_size);
+        CHECK_SHAPE(v, num_blocks_kv, page_block_size_kv, num_heads_k, head_size);
+        CHECK_SHAPE(block_table_kv, batch_size, max_num_blocks_per_seq_kv);
+    }
+    if (!paged_Out) {
+        CHECK_SHAPE(out, total_q, num_heads, head_size);
+        CHECK_SHAPE(dout, total_q, num_heads, head_size);
+    } else {
+        CHECK_SHAPE(out, num_blocks_out, page_block_size_out, num_heads, head_size);
+        CHECK_SHAPE(block_table_out, batch_size, max_num_blocks_per_seq_out);
+    }
     CHECK_SHAPE(cu_seqlens_q, batch_size + 1);
     CHECK_SHAPE(cu_seqlens_k, batch_size + 1);
 
@@ -1174,7 +1270,12 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
         TORCH_CHECK(dq.dtype() == q_dtype, "dq must have the same dtype as q");
         CHECK_DEVICE(dq);
         TORCH_CHECK(dq.stride(-1) == 1, "dq must have contiguous last dimension");
-        CHECK_SHAPE(dq, total_q, num_heads, head_size);
+        if (!paged_Q) {
+            CHECK_SHAPE(dq, total_q, num_heads, head_size);
+        } else {
+            CHECK_SHAPE(dq, num_blocks_q, page_block_size_q, num_heads, head_size);
+            CHECK_SHAPE(block_table_dq, batch_size, max_num_blocks_per_seq_dq);
+        }
     } else {
         dq = torch::empty_like(q);
     }
@@ -1183,7 +1284,12 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
         TORCH_CHECK(dk.dtype() == q_dtype, "dk must have the same dtype as q");
         CHECK_DEVICE(dk);
         TORCH_CHECK(dk.stride(-1) == 1, "dk must have contiguous last dimension");
-        CHECK_SHAPE(dk, total_k, num_heads_k, head_size);
+        if (!paged_dKV) {
+            CHECK_SHAPE(dk, total_k, num_heads_k, head_size);
+        } else {
+            CHECK_SHAPE(dk, num_blocks_dkv, page_block_size_dkv, num_heads_k, head_size);
+            CHECK_SHAPE(block_table_dkv, batch_size, max_num_blocks_per_seq_dkv);
+        }
     } else {
         dk = torch::empty_like(k);
     }
@@ -1192,7 +1298,11 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
         TORCH_CHECK(dv.dtype() == q_dtype, "dv must have the same dtype as q");
         CHECK_DEVICE(dv);
         TORCH_CHECK(dv.stride(-1) == 1, "dv must have contiguous last dimension");
-        CHECK_SHAPE(dv, total_k, num_heads_k, head_size);
+        if (!paged_dKV) {
+            CHECK_SHAPE(dv, total_k, num_heads_k, head_size);
+        } else {
+            CHECK_SHAPE(dv, num_blocks_dkv, page_block_size_dkv, num_heads_k, head_size);
+        }
     } else {
         dv = torch::empty_like(v);
     }
@@ -1268,6 +1378,51 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
                      /*unpadded_lse*/true);
     params.dq_accum_split_stride = !deterministic ? 0 : dq_accum.stride(0);
     params.total_q = total_q;
+
+    if (paged_Q) {
+        params.block_table_q = block_table_q.data_ptr<int>();
+        params.block_table_batch_stride_q = block_table_q.stride(0);
+        params.q_batch_stride = q.stride(0);
+        params.page_block_size_q = page_block_size_q;
+    } else {
+        params.block_table_q = nullptr;
+    }
+    if (paged_KV) {
+        params.block_table_kv = block_table_kv.data_ptr<int>();
+        params.block_table_batch_stride_kv = block_table_kv.stride(0);
+        params.k_batch_stride = k.stride(0);
+        params.v_batch_stride = v.stride(0);
+        params.page_block_size_kv = page_block_size_kv;
+    } else {
+        params.block_table_kv = nullptr;
+    }
+    if (paged_Out) {
+        params.block_table_out = block_table_out.data_ptr<int>();
+        params.block_table_batch_stride_out = block_table_out.stride(0);
+        params.o_batch_stride = out.stride(0);
+        params.do_batch_stride = dout.stride(0);
+        params.page_block_size_out = page_block_size_out;
+        params.num_page_blocks_out = num_blocks_out;
+    } else {
+        params.block_table_out = nullptr;
+    }
+    if (paged_dQ) {
+        params.block_table_dq = block_table_dq.data_ptr<int>();
+        params.block_table_batch_stride_dq = block_table_dq.stride(0);
+        params.dq_batch_stride = dq.stride(0);
+        params.page_block_size_dq = page_block_size_dq;
+    } else {
+        params.block_table_dq = nullptr;
+    }
+    if (paged_dKV) {
+        params.block_table_dkv = block_table_dkv.data_ptr<int>();
+        params.block_table_batch_stride_dkv = block_table_dkv.stride(0);
+        params.dk_batch_stride = dk.stride(0);
+        params.dv_batch_stride = dv.stride(0);
+        params.page_block_size_dkv = page_block_size_dkv;
+    } else {
+        params.block_table_dkv = nullptr;
+    }
 
     auto launch = &run_mha_bwd;
 

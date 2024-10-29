@@ -53,24 +53,24 @@ def round_multiple(x, m):
 # torch.compile() support is only enabled for pytorch >= 2.4
 # The reason for this is that we are using the new custom_op and register_fake
 # APIs, which support inplace modification of inputs in the function itself
-if torch.__version__ >= "2.4.0":
-    _torch_custom_op_wrapper = torch.library.custom_op
-    _torch_register_fake_wrapper = torch.library.register_fake
-else:
-    def noop_custom_op_wrapper(name, fn=None, /, *, mutates_args, device_types=None, schema=None):
-        def wrap(func):
-            return func
-        if fn is None:
-            return wrap
-        return fn
-    def noop_register_fake_wrapper(op, fn=None, /, *, lib=None, _stacklevel=1):
-        def wrap(func):
-            return func
-        if fn is None:
-            return wrap
-        return fn
-    _torch_custom_op_wrapper = noop_custom_op_wrapper
-    _torch_register_fake_wrapper = noop_register_fake_wrapper
+# if torch.__version__ >= "2.4.0":
+#     _torch_custom_op_wrapper = torch.library.custom_op
+#     _torch_register_fake_wrapper = torch.library.register_fake
+# else:
+def noop_custom_op_wrapper(name, fn=None, /, *, mutates_args, device_types=None, schema=None):
+    def wrap(func):
+        return func
+    if fn is None:
+        return wrap
+    return fn
+def noop_register_fake_wrapper(op, fn=None, /, *, lib=None, _stacklevel=1):
+    def wrap(func):
+        return func
+    if fn is None:
+        return wrap
+    return fn
+_torch_custom_op_wrapper = noop_custom_op_wrapper
+_torch_register_fake_wrapper = noop_register_fake_wrapper
 
 
 @_torch_custom_op_wrapper("flash_attn::_flash_attn_forward", mutates_args=(), device_types="cuda")
@@ -133,10 +133,10 @@ def _flash_attn_forward_fake(
     return out, softmax_lse, p, rng_state
 
 
-if torch.__version__ >= "2.4.0":
-    _wrapped_flash_attn_forward = torch.ops.flash_attn._flash_attn_forward
-else:
-    _wrapped_flash_attn_forward = _flash_attn_forward
+# if torch.__version__ >= "2.4.0":
+#     _wrapped_flash_attn_forward = torch.ops.flash_attn._flash_attn_forward
+# else:
+_wrapped_flash_attn_forward = _flash_attn_forward
 
 
 @_torch_custom_op_wrapper("flash_attn::_flash_attn_varlen_forward", mutates_args=(), device_types="cuda")
@@ -233,10 +233,10 @@ def _flash_attn_varlen_forward_fake(
     return out, softmax_lse, p, rng_state
 
 
-if torch.__version__ >= "2.4.0":
-    _wrapped_flash_attn_varlen_forward = torch.ops.flash_attn._flash_attn_varlen_forward
-else:
-    _wrapped_flash_attn_varlen_forward = _flash_attn_varlen_forward
+# if torch.__version__ >= "2.4.0":
+#     _wrapped_flash_attn_varlen_forward = torch.ops.flash_attn._flash_attn_varlen_forward
+# else:
+_wrapped_flash_attn_varlen_forward = _flash_attn_varlen_forward
 
 
 @_torch_custom_op_wrapper("flash_attn::_flash_attn_backward", mutates_args=("dq", "dk", "dv"), device_types="cuda")
@@ -325,10 +325,10 @@ def _flash_attn_backward_fake(
     return softmax_d
 
 
-if torch.__version__ >= "2.4.0":
-    _wrapped_flash_attn_backward = torch.ops.flash_attn._flash_attn_backward
-else:
-    _wrapped_flash_attn_backward = _flash_attn_backward
+# if torch.__version__ >= "2.4.0":
+#     _wrapped_flash_attn_backward = torch.ops.flash_attn._flash_attn_backward
+# else:
+_wrapped_flash_attn_backward = _flash_attn_backward
 
 
 @_torch_custom_op_wrapper("flash_attn::_flash_attn_varlen_backward", mutates_args=("dq", "dk", "dv"), device_types="cuda")
@@ -354,6 +354,11 @@ def _flash_attn_varlen_backward(
     softcap: float,
     alibi_slopes: Optional[torch.Tensor],
     deterministic: bool,
+    q_block_table: Optional[torch.Tensor] = None,
+    kv_block_table: Optional[torch.Tensor] = None,
+    out_block_table: Optional[torch.Tensor] = None,
+    dq_block_table: Optional[torch.Tensor] = None,
+    dkv_block_table: Optional[torch.Tensor] = None,
     rng_state: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
@@ -375,6 +380,11 @@ def _flash_attn_varlen_backward(
         dv,
         cu_seqlens_q,
         cu_seqlens_k,
+        q_block_table,
+        kv_block_table,
+        out_block_table,
+        dq_block_table,
+        dkv_block_table,
         alibi_slopes,
         max_seqlen_q,
         max_seqlen_k,
@@ -434,10 +444,10 @@ def _flash_attn_varlen_backward_fake(
     return softmax_d
 
 
-if torch.__version__ >= "2.4.0":
-    _wrapped_flash_attn_varlen_backward = torch.ops.flash_attn._flash_attn_varlen_backward
-else:
-    _wrapped_flash_attn_varlen_backward = _flash_attn_varlen_backward
+# if torch.__version__ >= "2.4.0":
+#     _wrapped_flash_attn_varlen_backward = torch.ops.flash_attn._flash_attn_varlen_backward
+# else:
+_wrapped_flash_attn_varlen_backward = _flash_attn_varlen_backward
 
 
 class FlashAttnQKVPackedFunc(torch.autograd.Function):
@@ -713,8 +723,12 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         q_block_table,
         kv_block_table,
         out_block_table,
+        get_dq_block_table_,
+        get_dkv_block_table_,
         out_,
         lse_,
+        get_dq_,
+        get_dkv_,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -750,7 +764,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             lse_=lse_,
         )
         ctx.save_for_backward(
-            q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
+            q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state, q_block_table, kv_block_table, out_block_table
         )
         ctx.dropout_p = dropout_p
         ctx.max_seqlen_q = max_seqlen_q
@@ -761,17 +775,34 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         ctx.softcap = softcap
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
+        ctx.get_dq = get_dq_
+        ctx.get_dkv = get_dkv_
+        ctx.get_dq_block_table = get_dq_block_table_
+        ctx.get_dkv_block_table = get_dkv_block_table_
         out = out_padded[..., :head_size_og]
         return out if not return_softmax else (out, softmax_lse, S_dmask)
 
     @staticmethod
     def backward(ctx, dout, *args):
-        raise NotImplementedError
-        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
-        dq = torch.empty_like(q)
-        kv_shape = k.shape[:-2] + (2, *k.shape[-2:])
-        dkv = torch.empty(kv_shape, dtype=k.dtype, device=k.device)
-        head_size_og = dout.size(2)
+        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state, q_block_table, kv_block_table, out_block_table = ctx.saved_tensors
+        if ctx.get_dq_block_table is not None:
+            dq_block_table = ctx.get_dq_block_table()
+            dq = ctx.get_dq()
+        else:
+            dq_block_table = None
+            dq = torch.empty_like(q)
+        if ctx.get_dkv_block_table is not None:
+            dkv_block_table = ctx.get_dkv_block_table()
+            dkv = ctx.get_dkv()
+            dk = dkv[:, :, 0]
+            dv = dkv[:, :, 1]
+        else:
+            dkv_block_table = None
+            kv_shape = k.shape[:-2] + (2, *k.shape[-2:])
+            dkv = torch.empty(kv_shape, dtype=k.dtype, device=k.device)
+            dk = dkv[:, 0]
+            dv = dkv[:, 1]
+        head_size_og = dout.size(2) if out_block_table is None else dout.size(3)
         dout_padded = dout
         if head_size_og % 8 != 0:
             dout_padded = torch.nn.functional.pad(dout, [0, 8 - head_size_og % 8])
@@ -783,8 +814,8 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             out,
             softmax_lse,
             dq,
-            dkv[:, 0],
-            dkv[:, 1],
+            dk,
+            dv,
             cu_seqlens_q,
             cu_seqlens_k,
             ctx.max_seqlen_q,
@@ -797,11 +828,16 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
+            q_block_table=q_block_table,
+            kv_block_table=kv_block_table,
+            out_block_table=out_block_table,
+            dq_block_table=dq_block_table,
+            dkv_block_table=dkv_block_table,
             rng_state=rng_state,
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
-        return dq, dkv, None, None, None, None, None, None, None, None, None, None, None, None
+        return tuple([dq, dkv] + [None] * 21)
 
 
 class FlashAttnFunc(torch.autograd.Function):
@@ -1281,8 +1317,12 @@ def flash_attn_varlen_kvpacked_func(
     q_block_table=None,
     kv_block_table=None,
     out_block_table=None,
+    get_dq_block_table_=None,
+    get_dkv_block_table_=None,
     out_=None,
     lse_=None,
+    get_dq_=None,
+    get_dkv_=None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     If K, V are already stacked into 1 tensor, this function will be faster than
@@ -1359,8 +1399,12 @@ def flash_attn_varlen_kvpacked_func(
         q_block_table,
         kv_block_table,
         out_block_table,
+        get_dq_block_table_,
+        get_dkv_block_table_,
         out_,
         lse_,
+        get_dq_,
+        get_dkv_,
     )
 
 
