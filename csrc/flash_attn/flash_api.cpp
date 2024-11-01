@@ -1273,7 +1273,7 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size or n
         if (!paged_Q) {
             CHECK_SHAPE(dq, total_q, num_heads, head_size);
         } else {
-            CHECK_SHAPE(dq, num_blocks_q, page_block_size_q, num_heads, head_size);
+            CHECK_SHAPE(dq, num_blocks_dq, page_block_size_q, num_heads, head_size);
             CHECK_SHAPE(block_table_dq, batch_size, max_num_blocks_per_seq_dq);
         }
     } else {
