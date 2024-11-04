@@ -239,11 +239,13 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
     FP16_SWITCH(!params.is_bf16, [&] {
         HEADDIM_SWITCH(params.d, [&] {
             BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-                if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
-                    run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
-                } else {
-                    run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal>(params, stream);
-                }
+                BOOL_SWITCH(params.attn_mask_ptr != nullptr, Has_Mask, [&] {
+                    if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
+                        run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
+                    } else {
+                        run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal, Has_Mask>(params, stream);
+                    }
+                });
             });
         });
     });
@@ -522,6 +524,9 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                c10::optional<at::Tensor> &lse_, // num_heads x total_q, total_q := \sum_{i=0}^{b} s_i or num_heads x num_blocks x page_block_size if there's a block_table.
                const at::Tensor &cu_seqlens_q,  // b+1
                const at::Tensor &cu_seqlens_k,  // b+1
+               c10::optional<at::Tensor> &attn_mask_, // bool tensor of shape sum(q_seqlen * k_seqlen), for each input sequence
+               c10::optional<at::Tensor> &attn_mask_offsets_, // int tensor of shape b
+               c10::optional<at::Tensor> &attn_mask_strides_, // int tensor of shape b
                c10::optional<at::Tensor> &seqused_k, // b. If given, only this many elements of each batch element's keys are used.
                c10::optional<const at::Tensor> &leftpad_k_, // batch_size
                c10::optional<at::Tensor> &block_table_q_, // batch_size x max_num_blocks_per_seq
@@ -786,6 +791,28 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     params.page_block_size_kv = page_block_size_kv;
     params.page_block_size_out = page_block_size_out;
     params.num_page_blocks_out = num_blocks_out;
+
+    at::Tensor attn_mask;
+    if (attn_mask_.has_value()) {
+        attn_mask = attn_mask_.value();
+        TORCH_CHECK(attn_mask.dtype() == torch::kBool, "attn_mask must have dtype bool");
+        CHECK_DEVICE(attn_mask);
+        TORCH_CHECK(attn_mask.is_contiguous(), "attn_mask must be contiguous");
+        TORCH_CHECK(attn_mask_offsets_.has_value(), "attn_mask_offsets must be passed if attn_mask is passed");
+        TORCH_CHECK(attn_mask_strides_.has_value(), "attn_mask_strides must be passed if attn_mask is passed");
+        TORCH_CHECK(attn_mask_offsets_.value().dtype() == torch::kInt32, "attn_mask_offsets must have dtype int32");
+        TORCH_CHECK(attn_mask_strides_.value().dtype() == torch::kInt32, "attn_mask_strides must have dtype int32");
+        CHECK_SHAPE(attn_mask_offsets_.value(), batch_size);
+        CHECK_SHAPE(attn_mask_strides_.value(), batch_size);
+        params.attn_mask = attn_mask.data_ptr<bool>();
+        params.attn_mask_offsets = attn_mask_offsets_.value().data_ptr<int>();
+        params.attn_mask_strides = attn_mask_strides_.value().data_ptr<int>();
+    } else {
+        params.attn_mask_ptr = nullptr;
+        params.attn_mask_offsets = nullptr;
+        params.attn_mask_strides = nullptr;
+    }
+    
 
     // Keep references to these tensors to extend their lifetime
     at::Tensor softmax_lse_accum, out_accum;

@@ -208,6 +208,30 @@ struct Mask {
         }
     };
 
+    template <typename Engine, typename Layout>
+    __forceinline__ __device__ void apply_mask(Tensor<Engine, Layout> &tensor_,
+                                                      Tensor<Engine, Layout> &mask_) {
+        static_assert(Layout::rank == 3, "Only support 3D Tensor");
+        static_assert(decltype(size<0>(tensor_))::value == 4, "First dimension must be 4");
+        static_assert(!Has_alibi, "Arbitrary masking does not support alibi for now.");
+        // Reshape tensor_ from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
+        Tensor tensor = make_tensor(tensor_.data(), flash::convert_layout_acc_rowcol(tensor_.layout()));
+        #pragma unroll
+        for (int mi = 0; mi < size<0, 1>(tensor); ++mi) {
+            #pragma unroll
+            for (int i = 0; i < size<0, 0>(tensor); ++i) {
+                #pragma unroll
+                for (int nj = 0; nj < size<1, 1>(tensor); ++nj) {
+                    #pragma unroll
+                    for (int j = 0; j < size<1, 0>(tensor); ++j) {
+                        if (mask_(make_coord(i, mi), make_coord(j, nj)) == false) {
+                            tensor(make_coord(i, mi), make_coord(j, nj)) = -INFINITY;
+                        }
+                    }
+                }
+            }
+        }
+    };
 };
 
 } // namespace flash

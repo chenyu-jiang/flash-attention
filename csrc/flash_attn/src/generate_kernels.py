@@ -17,6 +17,7 @@ DTYPE_MAP = {
 SM = [80]  # Sm80 kernels support up to
 HEAD_DIMENSIONS = [32, 64, 96, 128, 160, 192, 256]
 IS_CAUSAL = ["false", "true"]
+HAS_MASK = ["false", "true"]
 KERNEL_IMPL_TEMPLATE_FWD = """#include "flash_fwd_launch_template.h"
 
 template<>
@@ -27,7 +28,7 @@ void run_mha_fwd_<{DTYPE}, {HEAD_DIM}, {IS_CAUSAL}>(Flash_fwd_params &params, cu
 
 KERNEL_IMPL_TEMPLATE_FWD_SPLIT = """#include "flash_fwd_launch_template.h"
 
-template void run_mha_fwd_splitkv_dispatch<{DTYPE}, {HEAD_DIM}, {IS_CAUSAL}>(Flash_fwd_params &params, cudaStream_t stream);
+template void run_mha_fwd_splitkv_dispatch<{DTYPE}, {HEAD_DIM}, {IS_CAUSAL}, {HAS_MASK}>(Flash_fwd_params &params, cudaStream_t stream);
 """
 
 KERNEL_IMPL_TEMPLATE_BWD = """#include "flash_bwd_launch_template.h"
@@ -46,31 +47,36 @@ class Kernel:
     head_dim: int
     is_causal: bool
     direction: str
+    has_mask: bool = False
 
     @property
     def template(self) -> str:
         if self.direction == "fwd":
             return KERNEL_IMPL_TEMPLATE_FWD.format(
-                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, IS_CAUSAL=self.is_causal
+                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, IS_CAUSAL=self.is_causal,
             )
         elif self.direction == "bwd":
             return KERNEL_IMPL_TEMPLATE_BWD.format(
-                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, IS_CAUSAL=self.is_causal
+                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, IS_CAUSAL=self.is_causal, 
             )
         else:
             return KERNEL_IMPL_TEMPLATE_FWD_SPLIT.format(
-                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, IS_CAUSAL=self.is_causal
+                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, IS_CAUSAL=self.is_causal, HAS_MASK=self.has_mask
             )
 
     @property
     def filename(self) -> str:
-        return f"flash_{self.direction}_hdim{self.head_dim}_{self.dtype}_{'causal_' if self.is_causal == 'true' else ''}sm{self.sm}.cu"
+        return f"flash_{self.direction}_hdim{self.head_dim}_{self.dtype}_{'causal_' if self.is_causal == 'true' else ''}_{'masked_' if self.has_mask == 'true' else ''}sm{self.sm}.cu"
 
 
 def get_all_kernels() -> List[Kernel]:
     for direction in ["fwd", "fwd_split", "bwd"]:
         for dtype, head_dim, is_causal, sm in itertools.product(DTYPE_MAP.keys(), HEAD_DIMENSIONS, IS_CAUSAL, SM):
-            yield Kernel(sm=sm, dtype=dtype, head_dim=head_dim, is_causal=is_causal, direction=direction)
+            if direction == "fwd_split":
+                for has_mask in HAS_MASK:
+                    yield Kernel(sm=sm, dtype=dtype, head_dim=head_dim, is_causal=is_causal, has_mask=has_mask, direction=direction)
+            else:
+                yield Kernel(sm=sm, dtype=dtype, head_dim=head_dim, is_causal=is_causal, direction=direction)
 
 
 def write_kernel(kernel: Kernel, autogen_dir: Path) -> None:

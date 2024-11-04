@@ -116,6 +116,11 @@ struct Flash_fwd_params : public Qkv_params {
     int page_block_size_out;
     int num_page_blocks_out;
 
+    // masks
+    bool * __restrict__ attn_mask_ptr;
+    int * __restrict__ attn_mask_offsets;
+    int * __restrict__ attn_mask_strides;
+
     // The dropout probability (probability of keeping an activation).
     float p_dropout;
     // uint32_t p_dropout_in_uint;
