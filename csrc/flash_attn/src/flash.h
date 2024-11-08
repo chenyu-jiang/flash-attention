@@ -117,9 +117,14 @@ struct Flash_fwd_params : public Qkv_params {
     int num_page_blocks_out;
 
     // masks
-    bool * __restrict__ attn_mask_ptr;
-    int * __restrict__ attn_mask_offsets;
-    int * __restrict__ attn_mask_strides;
+    int * __restrict__ attn_range_min_ptr1;
+    int * __restrict__ attn_range_max_ptr1;
+    int * __restrict__ attn_range_min_ptr2;
+    int * __restrict__ attn_range_max_ptr2;
+    int * __restrict__ attn_range_agg_min_mblocks_ptr1;
+    int * __restrict__ attn_range_agg_max_mblocks_ptr1;
+    int * __restrict__ attn_range_agg_min_mblocks_ptr2;
+    int * __restrict__ attn_range_agg_max_mblocks_ptr2;
 
     // The dropout probability (probability of keeping an activation).
     float p_dropout;
@@ -213,6 +218,6 @@ struct Flash_bwd_params : public Flash_fwd_params {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream);
-template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
+template<typename T, int Headdim, bool Is_causal, bool Has_range, bool Has_two_ranges> void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
 
 template<typename T, int Headdim, bool Is_causal> void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);

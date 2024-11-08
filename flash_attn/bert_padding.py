@@ -211,7 +211,7 @@ def pad_input(hidden_states, indices, batch, seqlen):
     Return:
         hidden_states: (batch, seqlen, ...)
     """
-    dim = hidden_states.shape[-1]
+    # dim = hidden_states.shape[-1]
     # output = torch.zeros((batch * seqlen), dim, device=hidden_states.device, dtype=hidden_states.dtype)
     # output[indices] = hidden_states
     output = index_put_first_axis(hidden_states, indices, batch * seqlen)

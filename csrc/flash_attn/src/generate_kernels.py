@@ -17,7 +17,8 @@ DTYPE_MAP = {
 SM = [80]  # Sm80 kernels support up to
 HEAD_DIMENSIONS = [32, 64, 96, 128, 160, 192, 256]
 IS_CAUSAL = ["false", "true"]
-HAS_MASK = ["false", "true"]
+HAS_RANGE = ["false", "true"]
+HAS_TWO_RANGES = ["false", "true"]
 KERNEL_IMPL_TEMPLATE_FWD = """#include "flash_fwd_launch_template.h"
 
 template<>
@@ -28,7 +29,7 @@ void run_mha_fwd_<{DTYPE}, {HEAD_DIM}, {IS_CAUSAL}>(Flash_fwd_params &params, cu
 
 KERNEL_IMPL_TEMPLATE_FWD_SPLIT = """#include "flash_fwd_launch_template.h"
 
-template void run_mha_fwd_splitkv_dispatch<{DTYPE}, {HEAD_DIM}, {IS_CAUSAL}, {HAS_MASK}>(Flash_fwd_params &params, cudaStream_t stream);
+template void run_mha_fwd_splitkv_dispatch<{DTYPE}, {HEAD_DIM}, {IS_CAUSAL}, {HAS_RANGE}, {HAS_TWO_RANGES}>(Flash_fwd_params &params, cudaStream_t stream);
 """
 
 KERNEL_IMPL_TEMPLATE_BWD = """#include "flash_bwd_launch_template.h"
@@ -47,7 +48,8 @@ class Kernel:
     head_dim: int
     is_causal: bool
     direction: str
-    has_mask: bool = False
+    has_range: bool = False
+    has_two_ranges: bool = False
 
     @property
     def template(self) -> str:
@@ -61,20 +63,23 @@ class Kernel:
             )
         else:
             return KERNEL_IMPL_TEMPLATE_FWD_SPLIT.format(
-                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, IS_CAUSAL=self.is_causal, HAS_MASK=self.has_mask
+                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, IS_CAUSAL=self.is_causal, HAS_RANGE=self.has_range, HAS_TWO_RANGES=self.has_two_ranges
             )
 
     @property
     def filename(self) -> str:
-        return f"flash_{self.direction}_hdim{self.head_dim}_{self.dtype}_{'causal_' if self.is_causal == 'true' else ''}_{'masked_' if self.has_mask == 'true' else ''}sm{self.sm}.cu"
+        return f"flash_{self.direction}_hdim{self.head_dim}_{self.dtype}_{'causal_' if self.is_causal == 'true' else ''}{'range_' if (self.has_range == 'true' and self.has_two_ranges != 'true') else ''}{'2ranges_' if self.has_two_ranges == 'true' else ''}sm{self.sm}.cu"
 
 
 def get_all_kernels() -> List[Kernel]:
     for direction in ["fwd", "fwd_split", "bwd"]:
         for dtype, head_dim, is_causal, sm in itertools.product(DTYPE_MAP.keys(), HEAD_DIMENSIONS, IS_CAUSAL, SM):
             if direction == "fwd_split":
-                for has_mask in HAS_MASK:
-                    yield Kernel(sm=sm, dtype=dtype, head_dim=head_dim, is_causal=is_causal, has_mask=has_mask, direction=direction)
+                for has_range in HAS_RANGE:
+                    for has_two_ranges in HAS_TWO_RANGES:
+                        if has_two_ranges and not has_range:
+                            continue
+                        yield Kernel(sm=sm, dtype=dtype, head_dim=head_dim, is_causal=is_causal, direction=direction, has_range=has_range, has_two_ranges=has_two_ranges)
             else:
                 yield Kernel(sm=sm, dtype=dtype, head_dim=head_dim, is_causal=is_causal, direction=direction)
 

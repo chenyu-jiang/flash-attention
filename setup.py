@@ -268,6 +268,10 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
                 # "csrc/flash_attn/src/flash_fwd_split_hdim192_bf16_causal_sm80.cu",
                 # "csrc/flash_attn/src/flash_fwd_split_hdim256_fp16_causal_sm80.cu",
                 # "csrc/flash_attn/src/flash_fwd_split_hdim256_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim64_bf16_range_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim64_bf16_2ranges_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim64_bf16_causal_range_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim64_bf16_causal_2ranges_sm80.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"] + generator_flag,

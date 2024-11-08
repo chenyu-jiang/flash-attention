@@ -31,3 +31,5 @@ venv
 benchmarks/*.pdf
 benchmarks/*.plk
 benchmarks/*.ipynb
+*.log
+*.txt

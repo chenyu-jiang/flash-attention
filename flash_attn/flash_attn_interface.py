@@ -156,9 +156,7 @@ def _flash_attn_varlen_forward(
     softcap: float = 0.0,
     alibi_slopes: Optional[torch.Tensor] = None,
     return_softmax: bool = False,
-    attn_mask: Optional[torch.Tensor] = None,
-    attn_mask_offsets: Optional[torch.Tensor] = None,
-    attn_mask_strides: Optional[torch.Tensor] = None,
+    attn_range: Optional[torch.Tensor] = None,
     q_block_table: Optional[torch.Tensor] = None,
     kv_block_table: Optional[torch.Tensor] = None,
     out_block_table: Optional[torch.Tensor] = None,
@@ -176,9 +174,7 @@ def _flash_attn_varlen_forward(
         lse_,
         cu_seqlens_q,
         cu_seqlens_k,
-        attn_mask,
-        attn_mask_offsets,
-        attn_mask_strides,
+        attn_range,
         seqused_k,
         leftpad_k,
         q_block_table,
@@ -726,9 +722,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         alibi_slopes,
         deterministic,
         return_softmax,
-        attn_mask,
-        attn_mask_offsets,
-        attn_mask_strides,
+        attn_range,
         q_block_table,
         kv_block_table,
         out_block_table,
@@ -766,9 +760,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             softcap=softcap,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
-            attn_mask=attn_mask,
-            attn_mask_offsets=attn_mask_offsets,
-            attn_mask_strides=attn_mask_strides,
+            attn_range=attn_range,
             q_block_table=q_block_table,
             kv_block_table=kv_block_table,
             out_block_table=out_block_table,
@@ -849,7 +841,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
-        return tuple([dq, dkv] + [None] * 21)
+        return tuple([dq, dkv] + [None] * 24)
 
 
 class FlashAttnFunc(torch.autograd.Function):
@@ -1326,9 +1318,7 @@ def flash_attn_varlen_kvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
-    attn_mask=None,
-    attn_mask_offsets=None,
-    attn_mask_strides=None,
+    attn_range=None,
     q_block_table=None,
     kv_block_table=None,
     out_block_table=None,
@@ -1411,9 +1401,7 @@ def flash_attn_varlen_kvpacked_func(
         alibi_slopes,
         deterministic,
         return_attn_probs,
-        attn_mask,
-        attn_mask_offsets,
-        attn_mask_strides,
+        attn_range,
         q_block_table,
         kv_block_table,
         out_block_table,

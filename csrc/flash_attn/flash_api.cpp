@@ -239,12 +239,15 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
     FP16_SWITCH(!params.is_bf16, [&] {
         HEADDIM_SWITCH(params.d, [&] {
             BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-                BOOL_SWITCH(params.attn_mask_ptr != nullptr, Has_Mask, [&] {
-                    if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
-                        run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
-                    } else {
-                        run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal, Has_Mask>(params, stream);
-                    }
+                BOOL_SWITCH(params.attn_range_min_ptr1 != nullptr, Has_range, [&] {
+                    BOOL_SWITCH(Has_range && params.attn_range_min_ptr2 != nullptr, Has_two_ranges, [&] {
+                        if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
+                            run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
+                        } else {
+                            std::cout << "Has_range: " << Has_range << ", Has_two_ranges: " << Has_two_ranges << std::endl;
+                            run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal, Has_range, Has_two_ranges>(params, stream);
+                        }
+                    });
                 });
             });
         });
@@ -524,9 +527,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                c10::optional<at::Tensor> &lse_, // num_heads x total_q, total_q := \sum_{i=0}^{b} s_i or num_heads x num_blocks x page_block_size if there's a block_table.
                const at::Tensor &cu_seqlens_q,  // b+1
                const at::Tensor &cu_seqlens_k,  // b+1
-               c10::optional<at::Tensor> &attn_mask_, // bool tensor of shape sum(q_seqlen * k_seqlen), for each input sequence
-               c10::optional<at::Tensor> &attn_mask_offsets_, // int tensor of shape b
-               c10::optional<at::Tensor> &attn_mask_strides_, // int tensor of shape b
+               c10::optional<at::Tensor> &attn_range_, // int tensor of shape (2, sum(q_seqlens)) or (2, 2, sum(q_seqlens)) (if we have two ranges)
                c10::optional<at::Tensor> &seqused_k, // b. If given, only this many elements of each batch element's keys are used.
                c10::optional<const at::Tensor> &leftpad_k_, // batch_size
                c10::optional<at::Tensor> &block_table_q_, // batch_size x max_num_blocks_per_seq
@@ -792,27 +793,79 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     params.page_block_size_out = page_block_size_out;
     params.num_page_blocks_out = num_blocks_out;
 
-    at::Tensor attn_mask;
-    if (attn_mask_.has_value()) {
-        attn_mask = attn_mask_.value();
-        TORCH_CHECK(attn_mask.dtype() == torch::kBool, "attn_mask must have dtype bool");
-        CHECK_DEVICE(attn_mask);
-        TORCH_CHECK(attn_mask.is_contiguous(), "attn_mask must be contiguous");
-        TORCH_CHECK(attn_mask_offsets_.has_value(), "attn_mask_offsets must be passed if attn_mask is passed");
-        TORCH_CHECK(attn_mask_strides_.has_value(), "attn_mask_strides must be passed if attn_mask is passed");
-        TORCH_CHECK(attn_mask_offsets_.value().dtype() == torch::kInt32, "attn_mask_offsets must have dtype int32");
-        TORCH_CHECK(attn_mask_strides_.value().dtype() == torch::kInt32, "attn_mask_strides must have dtype int32");
-        CHECK_SHAPE(attn_mask_offsets_.value(), batch_size);
-        CHECK_SHAPE(attn_mask_strides_.value(), batch_size);
-        params.attn_mask = attn_mask.data_ptr<bool>();
-        params.attn_mask_offsets = attn_mask_offsets_.value().data_ptr<int>();
-        params.attn_mask_strides = attn_mask_strides_.value().data_ptr<int>();
+    at::Tensor attn_range_min_1;
+    at::Tensor attn_range_max_1;
+    at::Tensor attn_range_min_2;
+    at::Tensor attn_range_max_2;
+    at::Tensor attn_range1_agg_min_mblocks;
+    at::Tensor attn_range1_agg_max_mblocks;
+    at::Tensor attn_range2_agg_min_mblocks;
+    at::Tensor attn_range2_agg_max_mblocks;
+    if (attn_range_.has_value()) {
+        constexpr int m_block_size = 64; // matches flash_fwd_launch_template when using split kv, fix others later
+        // check attn range size
+        at::Tensor attn_range1 = attn_range_.value();
+        at::Tensor attn_range2;
+        TORCH_CHECK(attn_range1.dtype() == torch::kInt32, "attn_range must have dtype int32");
+        CHECK_DEVICE(attn_range1);
+        if (attn_range1.dim() == 2) {
+            CHECK_SHAPE(attn_range1, 2, total_q);
+            TORCH_CHECK(attn_range1.is_contiguous(), "attn_range must be contiguous");
+            attn_range_min_1 = attn_range1[0];
+            attn_range_max_1 = attn_range1[1];
+            // pad to multiple of m_block_size
+            attn_range_min_1 = torch::nn::functional::pad(attn_range_min_1, torch::nn::functional::PadFuncOptions({0, m_block_size - attn_range_min_1.size(0) % m_block_size}).value(max_seqlen_k));
+            attn_range_max_1 = torch::nn::functional::pad(attn_range_max_1, torch::nn::functional::PadFuncOptions({0, m_block_size - attn_range_max_1.size(0) % m_block_size}));
+            // aggregate ranges per m block
+            attn_range1_agg_min_mblocks = std::get<0>(attn_range_min_1.reshape({-1, m_block_size}).min(1));
+            attn_range1_agg_max_mblocks = std::get<0>(attn_range_max_1.reshape({-1, m_block_size}).max(1));
+            params.attn_range_min_ptr1 = attn_range_min_1.data_ptr<int>();
+            params.attn_range_max_ptr1 = attn_range_max_1.data_ptr<int>();
+            params.attn_range_min_ptr2 = nullptr;
+            params.attn_range_max_ptr2 = nullptr;
+            params.attn_range_agg_min_mblocks_ptr1 = attn_range1_agg_min_mblocks.data_ptr<int>();
+            params.attn_range_agg_max_mblocks_ptr1 = attn_range1_agg_max_mblocks.data_ptr<int>();
+            params.attn_range_agg_min_mblocks_ptr2 = nullptr;
+            params.attn_range_agg_max_mblocks_ptr2 = nullptr;
+            std::cout << "Set ptrs for one range." << std::endl;
+        } else {
+            TORCH_CHECK(attn_range1.dim() == 3, "attn_range must have size 2 or 3");
+            CHECK_SHAPE(attn_range1, 2, 2, total_q);
+            attn_range1 = attn_range1[0];
+            attn_range2 = attn_range1[1];
+            TORCH_CHECK(attn_range1.is_contiguous(), "attn_range must be contiguous");
+            TORCH_CHECK(attn_range2.is_contiguous(), "attn_range must be contiguous");
+            attn_range_min_1 = attn_range1[0];
+            attn_range_max_1 = attn_range1[1];
+            attn_range_min_2 = attn_range2[0];
+            attn_range_max_2 = attn_range2[1];
+            attn_range_min_1 = torch::nn::functional::pad(attn_range_min_1, torch::nn::functional::PadFuncOptions({0, m_block_size - attn_range_min_1.size(0) % m_block_size}).value(max_seqlen_k));
+            attn_range_max_1 = torch::nn::functional::pad(attn_range_max_1, torch::nn::functional::PadFuncOptions({0, m_block_size - attn_range_max_1.size(0) % m_block_size}));
+            attn_range_min_2 = torch::nn::functional::pad(attn_range_min_2, torch::nn::functional::PadFuncOptions({0, m_block_size - attn_range_min_2.size(0) % m_block_size}).value(max_seqlen_k));
+            attn_range_max_2 = torch::nn::functional::pad(attn_range_max_2, torch::nn::functional::PadFuncOptions({0, m_block_size - attn_range_max_2.size(0) % m_block_size}));
+            attn_range1_agg_min_mblocks = std::get<0>(attn_range_min_1.reshape({-1, m_block_size}).min(1));
+            attn_range1_agg_max_mblocks = std::get<0>(attn_range_max_1.reshape({-1, m_block_size}).max(1));
+            attn_range2_agg_min_mblocks = std::get<0>(attn_range_min_2.reshape({-1, m_block_size}).min(1));
+            attn_range2_agg_max_mblocks = std::get<0>(attn_range_max_2.reshape({-1, m_block_size}).max(1));
+            params.attn_range_min_ptr1 = attn_range_min_1.data_ptr<int>();
+            params.attn_range_max_ptr1 = attn_range_max_1.data_ptr<int>();
+            params.attn_range_min_ptr2 = attn_range_min_2.data_ptr<int>();
+            params.attn_range_max_ptr2 = attn_range_max_2.data_ptr<int>();
+            params.attn_range_agg_min_mblocks_ptr1 = attn_range1_agg_min_mblocks.data_ptr<int>();
+            params.attn_range_agg_max_mblocks_ptr1 = attn_range1_agg_max_mblocks.data_ptr<int>();
+            params.attn_range_agg_min_mblocks_ptr2 = attn_range2_agg_min_mblocks.data_ptr<int>();
+            params.attn_range_agg_max_mblocks_ptr2 = attn_range2_agg_max_mblocks.data_ptr<int>();
+        }
     } else {
-        params.attn_mask_ptr = nullptr;
-        params.attn_mask_offsets = nullptr;
-        params.attn_mask_strides = nullptr;
+        params.attn_range_min_ptr1 = nullptr;
+        params.attn_range_max_ptr1 = nullptr;
+        params.attn_range_min_ptr2 = nullptr;
+        params.attn_range_max_ptr2 = nullptr;
+        params.attn_range_agg_min_mblocks_ptr1 = nullptr;
+        params.attn_range_agg_max_mblocks_ptr1 = nullptr;
+        params.attn_range_agg_min_mblocks_ptr2 = nullptr;
+        params.attn_range_agg_max_mblocks_ptr2 = nullptr;
     }
-    
 
     // Keep references to these tensors to extend their lifetime
     at::Tensor softmax_lse_accum, out_accum;

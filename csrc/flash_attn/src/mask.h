@@ -208,23 +208,66 @@ struct Mask {
         }
     };
 
-    template <typename Engine, typename Layout>
-    __forceinline__ __device__ void apply_mask(Tensor<Engine, Layout> &tensor_,
-                                                      Tensor<Engine, Layout> &mask_) {
-        static_assert(Layout::rank == 3, "Only support 3D Tensor");
+    template <typename EngineT, typename EngineM, typename LayoutT, typename LayoutM>
+    __forceinline__ __device__ void apply_mask(Tensor<EngineT, LayoutT> &tensor_,
+                                               Tensor<EngineM, LayoutM> &range_min,
+                                               Tensor<EngineM, LayoutM> &range_max,
+                                               const int col_idx_offset_) {
+        static_assert(LayoutT::rank == 3, "Only support 3D Tensor");
         static_assert(decltype(size<0>(tensor_))::value == 4, "First dimension must be 4");
-        static_assert(!Has_alibi, "Arbitrary masking does not support alibi for now.");
         // Reshape tensor_ from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
         Tensor tensor = make_tensor(tensor_.data(), flash::convert_layout_acc_rowcol(tensor_.layout()));
+        const int lane_id = threadIdx.x % 32;
+        const int col_idx_offset = col_idx_offset_ + (lane_id % 4) * 2;
         #pragma unroll
         for (int mi = 0; mi < size<0, 1>(tensor); ++mi) {
             #pragma unroll
             for (int i = 0; i < size<0, 0>(tensor); ++i) {
+                const int col_idx_limit_left = range_min(mi, i);
+                const int col_idx_limit_right = range_max(mi, i);
                 #pragma unroll
                 for (int nj = 0; nj < size<1, 1>(tensor); ++nj) {
+                    const int col_idx_base = col_idx_offset + nj * 8;
                     #pragma unroll
                     for (int j = 0; j < size<1, 0>(tensor); ++j) {
-                        if (mask_(make_coord(i, mi), make_coord(j, nj)) == false) {
+                        const int col_idx = col_idx_base + j;
+                        if (col_idx > col_idx_limit_right || col_idx < col_idx_limit_left) {
+                            tensor(make_coord(i, mi), make_coord(j, nj)) = -INFINITY;
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    template <typename EngineT, typename EngineM, typename LayoutT, typename LayoutM>
+    __forceinline__ __device__ void apply_mask(Tensor<EngineT, LayoutT> &tensor_,
+                                               Tensor<EngineM, LayoutM> &range_min1,
+                                               Tensor<EngineM, LayoutM> &range_max1,
+                                               Tensor<EngineM, LayoutM> &range_min2,
+                                               Tensor<EngineM, LayoutM> &range_max2,
+                                               const int col_idx_offset_) {
+        static_assert(LayoutT::rank == 3, "Only support 3D Tensor");
+        static_assert(decltype(size<0>(tensor_))::value == 4, "First dimension must be 4");
+        // Reshape tensor_ from (MMA=4, MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, MMA_N))
+        Tensor tensor = make_tensor(tensor_.data(), flash::convert_layout_acc_rowcol(tensor_.layout()));
+        const int lane_id = threadIdx.x % 32;
+        const int col_idx_offset = col_idx_offset_ + (lane_id % 4) * 2;
+        #pragma unroll
+        for (int mi = 0; mi < size<0, 1>(tensor); ++mi) {
+            #pragma unroll
+            for (int i = 0; i < size<0, 0>(tensor); ++i) {
+                const int col_idx_limit_left1 = range_min1(mi, i);
+                const int col_idx_limit_right1 = range_max1(mi, i);
+                const int col_idx_limit_left2 = range_min2(mi, i);
+                const int col_idx_limit_right2 = range_max2(mi, i);
+                #pragma unroll
+                for (int nj = 0; nj < size<1, 1>(tensor); ++nj) {
+                    const int col_idx_base = col_idx_offset + nj * 8;
+                    #pragma unroll
+                    for (int j = 0; j < size<1, 0>(tensor); ++j) {
+                        const int col_idx = col_idx_base + j;
+                        if ((col_idx > col_idx_limit_right1 && col_idx < col_idx_limit_left2) || col_idx > col_idx_limit_right2 || col_idx < col_idx_limit_left1) {
                             tensor(make_coord(i, mi), make_coord(j, nj)) = -INFINITY;
                         }
                     }
