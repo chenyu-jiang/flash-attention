@@ -231,7 +231,7 @@ struct Mask {
                     #pragma unroll
                     for (int j = 0; j < size<1, 0>(tensor); ++j) {
                         const int col_idx = col_idx_base + j;
-                        if (col_idx > col_idx_limit_right || col_idx < col_idx_limit_left) {
+                        if (col_idx >= col_idx_limit_right || col_idx < col_idx_limit_left) {
                             tensor(make_coord(i, mi), make_coord(j, nj)) = -INFINITY;
                         }
                     }
@@ -267,7 +267,7 @@ struct Mask {
                     #pragma unroll
                     for (int j = 0; j < size<1, 0>(tensor); ++j) {
                         const int col_idx = col_idx_base + j;
-                        if ((col_idx > col_idx_limit_right1 && col_idx < col_idx_limit_left2) || col_idx > col_idx_limit_right2 || col_idx < col_idx_limit_left1) {
+                        if ((col_idx >= col_idx_limit_right1 && col_idx < col_idx_limit_left2) || col_idx >= col_idx_limit_right2 || col_idx < col_idx_limit_left1) {
                             tensor(make_coord(i, mi), make_coord(j, nj)) = -INFINITY;
                         }
                     }

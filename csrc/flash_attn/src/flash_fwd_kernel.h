@@ -520,12 +520,39 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
     // if (threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) { printf("Is_even_MN = %d, is_cumulativ = %d, seqlen_k_cache = %d, actual_seqlen_k = %d\n", Is_even_MN, params.is_seqlens_k_cumulative, binfo.seqlen_k_cache, binfo.actual_seqlen_k); }
     // if (threadIdx.x == 0 && blockIdx.y == 1 && blockIdx.z == 0) { printf("params.knew_ptr = %p, seqlen_k_cache + seqlen_knew = %d\n", params.knew_ptr, binfo.seqlen_k_cache + (params.knew_ptr == nullptr ? 0 : params.seqlen_knew)); }
+    // if(tidx == 0) {
+    //     printf("INIT: bidb = %d, bidh = %d, m_block = %d, n_split_idx = %d\n", bidb, bidh, m_block, n_split_idx);
+    // }
     if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
 
     const int n_blocks_per_split = ((params.seqlen_k + kBlockN - 1) / kBlockN + num_n_splits - 1) / num_n_splits;
     const int n_block_min = [&]{
         if constexpr (Has_range) {
-            return std::max(n_split_idx * n_blocks_per_split, params.attn_range_agg_min_mblocks_ptr1[m_block]);
+            __syncthreads();
+            // reduction to get min of this m_block
+            static_assert(kNWarps >= 2);
+            // direct load the value to register
+            const int thr_offset = m_block * kBlockM + tidx;
+            const int warp_id = tidx / 32;
+            const int lane_id = tidx % 32;
+            int thr_val = thr_offset >= binfo.actual_seqlen_q ?
+                params.seqlen_k :
+                params.attn_range_min_ptr1[binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM + tidx];
+            if (warp_id == 0 || warp_id == 1) {
+                // parallel reduction with two warps
+                #pragma unroll
+                for (int i=16; i>=1; i/=2) {
+                    thr_val = std::min(__shfl_xor_sync(0xffffffff, thr_val, i, 32), thr_val);
+                }
+                if (lane_id == 0) {
+                    // write the min value to shared memory
+                    reinterpret_cast<int *>(smem_)[warp_id] = thr_val;
+                }
+            }
+            __syncthreads(); // wait for the shared memory write
+            // load the min value from shared memory
+            const int min_col_id_for_curr_mblock = std::min(reinterpret_cast<int *>(smem_)[0], reinterpret_cast<int *>(smem_)[1]);
+            return std::max(n_split_idx * n_blocks_per_split, min_col_id_for_curr_mblock / kBlockN);
         } else {
             return (!Is_local
                     ? n_split_idx * n_blocks_per_split
@@ -537,11 +564,80 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         n_block_max = std::min(n_block_max,
                                cute::ceil_div((m_block + 1) * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q + params.window_size_right, kBlockN));
     }
-    if constexpr (Has_two_ranges) {
-        n_block_max = std::min(n_block_max, params.attn_range_agg_max_mblocks_ptr2[m_block]);
-    } else if constexpr (Has_range) {
-        n_block_max = std::min(n_block_max, params.attn_range_agg_max_mblocks_ptr1[m_block]);
+    if constexpr (Has_range) {
+        __syncthreads();
+        const int* attn_range_max_ptr = Has_two_ranges ? params.attn_range_max_ptr2 : params.attn_range_max_ptr1;
+        // direct load the value to register
+        const int thr_offset = m_block * kBlockM + tidx;
+        const int warp_id = tidx / 32;
+        const int lane_id = tidx % 32;
+        int thr_val = thr_offset >= binfo.actual_seqlen_q ?
+            0 :
+            attn_range_max_ptr[binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM + tidx];
+        if (warp_id == 0 || warp_id == 1) {
+            // parallel reduction with two warps
+            #pragma unroll
+            for (int i=16; i>=1; i/=2) {
+                thr_val = std::max(__shfl_xor_sync(0xffffffff, thr_val, i, 32), thr_val);
+            }
+            if (lane_id == 0) {
+                // write the min value to shared memory
+                reinterpret_cast<int *>(smem_)[warp_id] = thr_val;
+            }
+        }
+        __syncthreads(); // wait for the shared memory write
+        // load the min value from shared memory
+        const int max_col_id_for_curr_mblock = std::max(reinterpret_cast<int *>(smem_)[0], reinterpret_cast<int *>(smem_)[1]);
+        n_block_max = std::min(n_block_max, cute::ceil_div(max_col_id_for_curr_mblock - 1, kBlockN));
     }
+    int n_block_skip_start = -1;
+    int n_block_skip_end = -1;
+    if constexpr (Has_two_ranges) {
+        __syncthreads();
+        // calculate the range of block_n that should be skipped
+        const int* attn_range_max_ptr1 = params.attn_range_max_ptr1;
+        const int* attn_range_min_ptr2 = params.attn_range_min_ptr2;
+        // direct load the value to register
+        const int thr_offset = m_block * kBlockM + tidx;
+        const int warp_id = tidx / 32;
+        const int lane_id = tidx % 32;
+        int thr_val_max = thr_offset >= binfo.actual_seqlen_q ?
+            0 :
+            attn_range_max_ptr1[binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM + tidx];
+        int thr_val_min = thr_offset >= binfo.actual_seqlen_q ?
+            params.seqlen_k :
+            attn_range_min_ptr2[binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM + tidx];
+        if (warp_id == 0 || warp_id == 1) {
+            // parallel reduction with two warps
+            #pragma unroll
+            for (int i=16; i>=1; i/=2) {
+                thr_val_max = std::max(__shfl_xor_sync(0xffffffff, thr_val_max, i, 32), thr_val_max);
+                thr_val_min = std::min(__shfl_xor_sync(0xffffffff, thr_val_min, i, 32), thr_val_min);
+            }
+            if (lane_id == 0) {
+                // write the min value to shared memory
+                reinterpret_cast<int *>(smem_)[warp_id] = thr_val_max;
+                reinterpret_cast<int *>(smem_)[warp_id + 2] = thr_val_min;
+            }
+        }
+        __syncthreads(); // wait for the shared memory write
+        // load the min value from shared memory
+        const int max_col_id_range1_for_curr_mblock = std::max(reinterpret_cast<int *>(smem_)[0], reinterpret_cast<int *>(smem_)[1]);
+        const int min_col_id_range2_for_curr_mblock = std::min(reinterpret_cast<int *>(smem_)[2], reinterpret_cast<int *>(smem_)[3]);
+        const int max_n_block_range1 = cute::ceil_div(max_col_id_range1_for_curr_mblock - 1, kBlockN);
+        const int min_n_block_range2 = min_col_id_range2_for_curr_mblock / kBlockN;
+        if (min_n_block_range2 > max_n_block_range1) {
+            n_block_skip_start = max_n_block_range1;
+            n_block_skip_end = min_n_block_range2;
+        }
+        // if (tidx == 0) {
+        //     printf("bidb = %d, bidh = %d, m_block = %d, n_split_idx = %d, n_block_min = %d, n_block_max = %d, max_col_id_range1_for_curr_mblock = %d, min_col_id_range2_for_curr_mblock = %d, n_block_skip_start = %d, n_block_skip_end = %d\n", bidb, bidh, m_block, n_split_idx, n_block_min, n_block_max, max_col_id_range1_for_curr_mblock, min_col_id_range2_for_curr_mblock, n_block_skip_start, n_block_skip_end);
+        // }
+        __syncthreads();
+    }
+    // if (tidx == 0) {
+    //     printf("bidb = %d, bidh = %d, m_block = %d, n_split_idx = %d, n_block_min = %d, n_block_max = %d, n_block_skip_start = %d, n_block_skip_end = %d\n", bidb, bidh, m_block, n_split_idx, n_block_min, n_block_max, n_block_skip_start, n_block_skip_end);
+    // }
     // if(tidx == 0) {
     //     const index_t row_offset_lseaccum = ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM;
     //     printf("bidb = %d, bidh = %d, m_block = %d, n_split_idx = %d, num_n_splits = %d, n_block_min = %d, n_block_max = %d, row_offset_lseaccum = %d\n", bidb, bidh, m_block, n_split_idx, num_n_splits, n_block_min, n_block_max, row_offset_lseaccum);
@@ -550,6 +646,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         // We exit early and write 0 to gOaccum and -inf to gLSEaccum.
         // Otherwise we might read OOB elements from gK and gV,
         // or get wrong results when we combine gOaccum from different blocks.
+        // if(tidx == 0) {
+        //     printf("bidb = %d, bidh = %d, m_block = %d, row_idx_range = (%d, %d), n_split_idx = %d, n_block_min = %d, n_block_max = %d Exit Early.\n", bidb, bidh, m_block, m_block * kBlockM, (m_block + 1) * kBlockM, n_split_idx, n_block_min, n_block_max);
+        // }
         const int *block_table_out = params.block_table_out == nullptr ? nullptr : params.block_table_out + bidb * params.block_table_batch_stride_out;
         const int block_table_o_idx = block_table_out == nullptr ? 0 : m_block * kBlockM / params.page_block_size_out;
         const int block_table_o_offset = block_table_out == nullptr ? 0 : m_block * kBlockM - block_table_o_idx * params.page_block_size_out;
@@ -871,10 +970,10 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     flash::Mask<Is_causal, Is_local, Has_alibi> mask(binfo.actual_seqlen_k, binfo.actual_seqlen_q, params.window_size_left, params.window_size_right, alibi_slope);
 
     if constexpr (Has_range) {
-        Tensor gRangeMin = make_tensor(make_gmem_ptr(params.attn_range_min_ptr1) + m_block * kBlockM,
+        Tensor gRangeMin = make_tensor(make_gmem_ptr(params.attn_range_min_ptr1) + binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM,
                                        Shape<Int<kBlockM>>{},
                                        make_stride(_1{}));
-        Tensor gRangeMax = make_tensor(make_gmem_ptr(params.attn_range_max_ptr1) + m_block * kBlockM,
+        Tensor gRangeMax = make_tensor(make_gmem_ptr(params.attn_range_max_ptr1) + binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM,
                                         Shape<Int<kBlockM>>{},
                                         make_stride(_1{}));
         auto shape_acc = partition_shape_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});
@@ -890,32 +989,51 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         Tensor tRangeMax = make_tensor<int>(Shape<Int<shape0>, Int<shape1>>{}, Stride<Int<shape1>, _1>{});
         const int row_idx_offset = (tidx / 32) * 16 + (tidx % 32) / 4;
         constexpr int warp_row_stride = kNWarps * 16;
+        #pragma unroll
         for (int i = 0; i < shape0; i ++) {
             const int row_idx_base = row_idx_offset + i * warp_row_stride;
+            #pragma unroll
             for (int j=0; j < shape1; j++) {
                 const int row_idx = row_idx_base + j * 8;
-                tRangeMin(i, j) = gRangeMin(row_idx);
-                tRangeMax(i, j) = gRangeMax(row_idx);
+                if ((m_block * kBlockM + row_idx) < binfo.actual_seqlen_q) {
+                    tRangeMin(i, j) = gRangeMin(row_idx);
+                    tRangeMax(i, j) = gRangeMax(row_idx);
+                } else {
+                    tRangeMin(i, j) = 0;
+                    tRangeMax(i, j) = 0;
+                }
+                // if (bidb == 1 || bidb == 2) {
+                //     printf("(b%d, h%d, m%d, spl%d, t%d): row_idx: %d, min: %d, max: %d\n", bidb, bidh, m_block, n_split_idx, tidx, m_block * kBlockM + row_idx, tRangeMin(i, j), tRangeMax(i, j));
+                // }
             }
         }
         if constexpr (Has_two_ranges) {
-            Tensor gRangeMin2 = make_tensor(make_gmem_ptr(params.attn_range_min_ptr2) + m_block * kBlockM,
+            Tensor gRangeMin2 = make_tensor(make_gmem_ptr(params.attn_range_min_ptr2) + binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM,
                                             Shape<Int<kBlockM>>{},
                                             make_stride(_1{}));
-            Tensor gRangeMax2 = make_tensor(make_gmem_ptr(params.attn_range_max_ptr2) + m_block * kBlockM,
+            Tensor gRangeMax2 = make_tensor(make_gmem_ptr(params.attn_range_max_ptr2) + binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM,
                                             Shape<Int<kBlockM>>{},
                                             make_stride(_1{}));
             Tensor tRangeMin2 = make_tensor<int>(Shape<Int<shape0>, Int<shape1>>{}, Stride<Int<shape1>, _1>{});
             Tensor tRangeMax2 = make_tensor<int>(Shape<Int<shape0>, Int<shape1>>{}, Stride<Int<shape1>, _1>{});
+            #pragma unroll
             for (int i = 0; i < shape0; i ++) {
                 const int row_idx_base = row_idx_offset + i * warp_row_stride;
+                #pragma unroll
                 for (int j=0; j < shape1; j++) {
                     const int row_idx = row_idx_base + j * 8;
-                    tRangeMin2(i, j) = gRangeMin2(row_idx);
-                    tRangeMax2(i, j) = gRangeMax2(row_idx);
+                    if ((m_block * kBlockM + row_idx) < binfo.actual_seqlen_q) {
+                        tRangeMin2(i, j) = gRangeMin2(row_idx);
+                        tRangeMax2(i, j) = gRangeMax2(row_idx);
+                    } else {
+                        tRangeMin2(i, j) = 0;
+                        tRangeMax2(i, j) = 0;
+                    }
+                    // if (bidb == 1 && bidh == 1) {
+                    //     printf("(b%d, h%d, m%d, spl%d, t%d): row_idx: %d, min1: %d, max1: %d, min2: %d, max2: %d\n", bidb, bidh, m_block, n_split_idx, tidx, m_block * kBlockM + row_idx, tRangeMin(i, j), tRangeMax(i, j), tRangeMin2(i, j), tRangeMax2(i, j));
+                    // }
                 }
             }
-
             // For performance reason, we separate out two kinds of iterations:
             // those that need masking on S, and those that don't.
             // We need masking on S for the very last block when K and V has length not multiple of kBlockN.
@@ -927,8 +1045,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             constexpr int n_masking_steps = (!Is_causal && !Is_local) ? 1
                 : ((Is_even_MN && Is_causal) ? cute::ceil_div(kBlockM, kBlockN) : cute::ceil_div(kBlockM, kBlockN) + 1);
 
+            int last_n_block = n_block + 1;
             #pragma unroll
-            for (int masking_step = 0; masking_step < n_masking_steps; ++masking_step, --n_block) {
+            for (int masking_step = 0; masking_step < n_masking_steps; ++masking_step) {
                 Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N)
                 clear(acc_s);
                 flash::cp_async_wait<0>();
@@ -937,10 +1056,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 // Advance gV
                 if (masking_step > 0) {
                     if (block_table_kv == nullptr) {
-                        tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
+                        const int nblock_diff = last_n_block - n_block;
+                        tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride)) * nblock_diff;
                     } else {
-                        const int block_table_idx_cur = (n_block + 1) * kBlockN / params.page_block_size_kv;
-                        const int block_table_offset_cur = (n_block + 1) * kBlockN - block_table_idx_cur * params.page_block_size_kv;
+                        const int block_table_idx_cur = last_n_block * kBlockN / params.page_block_size_kv;
+                        const int block_table_offset_cur = last_n_block * kBlockN - block_table_idx_cur * params.page_block_size_kv;
                         const int block_table_idx_next = n_block * kBlockN / params.page_block_size_kv;
                         const int block_table_offset_next = n_block * kBlockN - block_table_idx_next * params.page_block_size_kv;
                         tVgV.data() = tVgV.data() + (block_table_kv[block_table_idx_next] - block_table_kv[block_table_idx_cur]) * params.v_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.v_row_stride;
@@ -973,15 +1093,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 // if (tidx == 0 && blockIdx.y == 0 && blockIdx.z == 0) { print(tVsV); }
                 // __syncthreads();
 
+                const int next_n_block = ((n_block - 1) < n_block_skip_end && (n_block - 1) >= n_block_skip_start) ? n_block_skip_start - 1 : n_block - 1;
                 if (n_block > n_block_min) {
                     // Advance gK
                     if (block_table_kv == nullptr) {
-                        tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
+                        const int nblock_diff = n_block - next_n_block;
+                        tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride)) * nblock_diff;
                     } else {
                         const int block_table_idx_cur = n_block * kBlockN / params.page_block_size_kv;
                         const int block_table_offset_cur = n_block * kBlockN - block_table_idx_cur * params.page_block_size_kv;
-                        const int block_table_idx_next = (n_block - 1) * kBlockN / params.page_block_size_kv;
-                        const int block_table_offset_next =(n_block - 1) * kBlockN - block_table_idx_next * params.page_block_size_kv;
+                        const int block_table_idx_next = next_n_block * kBlockN / params.page_block_size_kv;
+                        const int block_table_offset_next = next_n_block * kBlockN - block_table_idx_next * params.page_block_size_kv;
                         tKgK.data() = tKgK.data() + (block_table_kv[block_table_idx_next] - block_table_kv[block_table_idx_cur]) * params.k_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.k_row_stride;
                     }
                     flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV);
@@ -1007,23 +1129,27 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
                 // This check is at the end of the loop since we always have at least 1 iteration
                 if (n_masking_steps > 1 && n_block <= n_block_min) {
+                    last_n_block = n_block;
                     --n_block;
                     break;
                 }
+                last_n_block = n_block;
+                n_block = next_n_block;
             }
 
             // These are the iterations where we don't need masking on S
-            for (; n_block >= n_block_min; --n_block) {
+            for (; n_block >= n_block_min; ) {
                 Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N)
                 clear(acc_s);
                 flash::cp_async_wait<0>();
                 __syncthreads();
                 // Advance gV
                 if (block_table_kv == nullptr) {
-                    tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
+                    const int nblock_diff = last_n_block - n_block;
+                    tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride)) * nblock_diff;
                 } else {
-                    const int block_table_idx_cur = (n_block + 1) * kBlockN / params.page_block_size_kv;
-                    const int block_table_offset_cur = (n_block + 1) * kBlockN - block_table_idx_cur * params.page_block_size_kv;
+                    const int block_table_idx_cur = last_n_block * kBlockN / params.page_block_size_kv;
+                    const int block_table_offset_cur = last_n_block * kBlockN - block_table_idx_cur * params.page_block_size_kv;
                     const int block_table_idx_next = n_block * kBlockN / params.page_block_size_kv;
                     const int block_table_offset_next = n_block * kBlockN - block_table_idx_next * params.page_block_size_kv;
                     tVgV.data() = tVgV.data() + (block_table_kv[block_table_idx_next] - block_table_kv[block_table_idx_cur]) * params.v_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.v_row_stride;
@@ -1041,15 +1167,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
                 flash::cp_async_wait<0>();
                 __syncthreads();
+                const int next_n_block = ((n_block - 1) < n_block_skip_end && (n_block - 1) >= n_block_skip_start) ? n_block_skip_start - 1 : n_block - 1;
                 if (n_block > n_block_min) {
                     // Advance gK
                     if (block_table_kv == nullptr) {
-                        tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
+                        const int nblock_diff = n_block - next_n_block;
+                        tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride)) * nblock_diff;
                     } else {
                         const int block_table_idx_cur = n_block * kBlockN / params.page_block_size_kv;
                         const int block_table_offset_cur = n_block * kBlockN - block_table_idx_cur * params.page_block_size_kv;
-                        const int block_table_idx_next = (n_block - 1) * kBlockN / params.page_block_size_kv;
-                        const int block_table_offset_next = (n_block - 1) * kBlockN - block_table_idx_next * params.page_block_size_kv;
+                        const int block_table_idx_next = next_n_block * kBlockN / params.page_block_size_kv;
+                        const int block_table_offset_next = next_n_block * kBlockN - block_table_idx_next * params.page_block_size_kv;
                         tKgK.data() = tKgK.data() + (block_table_kv[block_table_idx_next] - block_table_kv[block_table_idx_cur]) * params.k_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.k_row_stride;
                     }
                     flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV);
@@ -1069,6 +1197,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
 
                 flash::gemm_rs(acc_o, tOrP, tOrVt, tOsVt, tiled_mma, smem_tiled_copy_V, smem_thr_copy_V);
+
+                last_n_block = n_block;
+                n_block = next_n_block;
             }
         } else {
             // For performance reason, we separate out two kinds of iterations:

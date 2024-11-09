@@ -121,10 +121,6 @@ struct Flash_fwd_params : public Qkv_params {
     int * __restrict__ attn_range_max_ptr1;
     int * __restrict__ attn_range_min_ptr2;
     int * __restrict__ attn_range_max_ptr2;
-    int * __restrict__ attn_range_agg_min_mblocks_ptr1;
-    int * __restrict__ attn_range_agg_max_mblocks_ptr1;
-    int * __restrict__ attn_range_agg_min_mblocks_ptr2;
-    int * __restrict__ attn_range_agg_max_mblocks_ptr2;
 
     // The dropout probability (probability of keeping an activation).
     float p_dropout;

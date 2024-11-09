@@ -116,16 +116,30 @@ def generate_qkv(
         max_seqlen_k = seqlen_k
 
     if masked:
+        raw_seqlens_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).tolist()
+        raw_seqlens_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).tolist()
         if mask_type == "causal":
-            raw_seqlens_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).tolist()
-            raw_seqlens_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).tolist()
             mask_ranges = torch.empty((2, cu_seqlens_q[-1].item()), dtype=torch.int32, device=q.device)
             for b, sl_q in enumerate(raw_seqlens_q):
                 for i in range(sl_q):
                     mask_ranges[0, cu_seqlens_q[b].item() + i] = 0
                     mask_ranges[1, cu_seqlens_q[b].item() + i] = max(0, i + raw_seqlens_k[b] - raw_seqlens_q[b] + 1)
+        elif mask_type == "two_ranges":
+            mask_ranges = torch.empty((2, 2, cu_seqlens_q[-1].item()), dtype=torch.int32, device=q.device)
+            for b, sl_q in enumerate(raw_seqlens_q):
+                for i in range(sl_q):
+                    # first range, 0 to 16
+                    range1_start = 0
+                    range1_end = min(16, raw_seqlens_k[b]) + 1
+                    range2_start = max(0, i - 16)
+                    range2_end = max(min(raw_seqlens_k[b] + 1, i + 17), range2_start)
+                    mask_ranges[0, 0, cu_seqlens_q[b].item() + i] = range1_start
+                    mask_ranges[0, 1, cu_seqlens_q[b].item() + i] = range1_end
+                    # second range, windowed with 16 each side
+                    mask_ranges[1, 0, cu_seqlens_q[b].item() + i] = range2_start
+                    mask_ranges[1, 1, cu_seqlens_q[b].item() + i] = range2_end
         else:
-            raise NotImplementedError
+            raise ValueError(f"Unknown mask type: {mask_type}")
     else:
         mask_ranges = None
 
@@ -1769,7 +1783,7 @@ def test_flash_attn_varlen_block_table(
         dq_pad_fn,
         dkv_pad_fn,
         attn_range,
-    ) = generate_qkv(q, *kv.unbind(dim=2), query_padding_mask, key_padding_mask, kvpacked=True, masked=masked)
+    ) = generate_qkv(q, *kv.unbind(dim=2), query_padding_mask, key_padding_mask, kvpacked=True, masked=masked, mask_type=mask_type)
     dout_unpad = torch.randn_like(q_unpad)
     q_block_table, kv_block_table, out_block_table, dq_block_table, dkv_block_table, q_buffer, kv_buffer, out, lse, dout_buffer, dq_buffer, dkv_buffer = _blockize_qkv_out(q_unpad, kv_unpad, dout_unpad, cu_seqlens_q, cu_seqlens_k, block_size, block_size)
     # print("q_block_table: ", q_block_table.size())
@@ -1813,6 +1827,9 @@ def test_flash_attn_varlen_block_table(
         get_dkv_=_get_dkv_buffer,
     )
     out_recon_blocked, sm_lse_recon_blocked = _reconstruct_blockized_out_lse(out_block_table, out_blocked, sm_lse_blocked, cu_seqlens_q)
+    print("==============================================")
+    print("====================FORWARD===================")
+    print("==============================================")
     # unblocked qkv and out
     if not masked:
         out_unpad, sm_lse, _ = flash_attn_varlen_kvpacked_func(
@@ -1856,9 +1873,9 @@ def test_flash_attn_varlen_block_table(
         print(f"Output mean diff blocked v.s. unblocked: {(out_recon_blocked - out_unpad).abs().mean().item()}")
         print(f"Sm LSE max diff blocked v.s. unblocked: {(sm_lse_recon_blocked - sm_lse).abs().max().item()}")
         print(f"Sm LSE mean diff blocked v.s. unblocked: {(sm_lse_recon_blocked - sm_lse).abs().mean().item()}")
+        recon_out_unblocked = output_pad_fn(out_unpad)
 
     recon_out_blocked = output_pad_fn(out_recon_blocked)
-    recon_out_unblocked = output_pad_fn(out_unpad)
 
     dropout_mask = None
 
@@ -1875,19 +1892,20 @@ def test_flash_attn_varlen_block_table(
         softcap=softcap,
         attn_range=attn_range,
     )
-    out_ref_causal, attn_ref_causal = attention_kvpacked_ref(
-        q,
-        kv,
-        query_padding_mask,
-        key_padding_mask,
-        attn_bias,
-        0.0,
-        dropout_mask,
-        causal=True,
-        window_size=window_size,
-        softcap=softcap,
-        # attn_range=attn_range,
-    )
+    if masked and mask_type == "causal":
+        out_ref_causal, attn_ref_causal = attention_kvpacked_ref(
+            q,
+            kv,
+            query_padding_mask,
+            key_padding_mask,
+            attn_bias,
+            0.0,
+            dropout_mask,
+            causal=True,
+            window_size=window_size,
+            softcap=softcap,
+            # attn_range=attn_range,
+        )
     out_pt, attn_pt = attention_kvpacked_ref(
         q,
         kv,
@@ -1906,13 +1924,18 @@ def test_flash_attn_varlen_block_table(
 
     print(f"Output max diff (blocked v.s. ref): {(recon_out_blocked - out_ref).abs().max().item()}")
     print(f"Output mean diff (blocked v.s. ref): {(recon_out_blocked - out_ref).abs().mean().item()}")
-    print(f"Output max diff (unblocked v.s. ref): {(recon_out_unblocked - out_ref).abs().max().item()}")
-    print(f"Output mean diff (unblocked v.s. ref): {(recon_out_unblocked - out_ref).abs().mean().item()}")
-    print(f"Output max diff (unblocked v.s. causal ref): {(recon_out_unblocked - out_ref_causal).abs().max().item()}")
-    print(f"Output mean diff (unblocked v.s. causal ref): {(recon_out_unblocked - out_ref_causal).abs().mean().item()}")
+    if not masked or mask_type == "causal":
+        print(f"Output max diff (unblocked v.s. ref): {(recon_out_unblocked - out_ref).abs().max().item()}")
+        print(f"Output mean diff (unblocked v.s. ref): {(recon_out_unblocked - out_ref).abs().mean().item()}")
+    if masked and mask_type == "causal":
+        print(f"Output max diff (unblocked v.s. causal ref): {(recon_out_unblocked - out_ref_causal).abs().max().item()}")
+        print(f"Output mean diff (unblocked v.s. causal ref): {(recon_out_unblocked - out_ref_causal).abs().mean().item()}")
     print(f"Pytorch max diff with Ref: {(out_pt - out_ref).abs().max().item()}")
     print(f"Pytorch mean diff with Ref: {(out_pt - out_ref).abs().mean().item()}")
 
+    # import code
+    # code.interact(local=locals())
+    # exit(0)
     # backward
     # blocked
     (
@@ -1924,7 +1947,10 @@ def test_flash_attn_varlen_block_table(
     dk_recon, dv_recon = dkv_pad_fn(dkv_recon).unbind(2)
 
     torch.cuda.synchronize()
-    print("Unblocked BW Finished.")
+    print("==============================================")
+    print("===================BACKWARD===================")
+    print("==============================================")
+    print()
     # unblocked
     (
         dq_unpad,
@@ -1972,7 +1998,7 @@ def test_flash_attn_varlen_block_table(
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.
-    assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
+    assert (recon_out_blocked - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
 
     assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
     assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
@@ -3058,5 +3084,5 @@ if __name__ == "__main__":
     #     512, 768, 128, 0.0, False, False, False, False, "mha", torch.bfloat16, True, 0.0
     # )
     test_flash_attn_varlen_block_table(
-        2048, 1024, 64, False, 256, False, False, "mha", torch.bfloat16, 0.0, masked=True
+        2048, 2048, 64, False, 256, False, False, "mha", torch.bfloat16, 0.0, masked=True, mask_type="two_ranges"
     )
