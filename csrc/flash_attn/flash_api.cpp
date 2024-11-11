@@ -244,8 +244,7 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
                         if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
                             run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
                         } else {
-                            std::cout << "Has_range: " << Has_range << ", Has_two_ranges: " << Has_two_ranges << std::endl;
-                            run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal, Has_range, Has_two_ranges>(params, stream);
+                            run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal, Has_range && !Is_causal, Has_two_ranges && !Is_causal>(params, stream);
                         }
                     });
                 });
@@ -901,7 +900,11 @@ void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     FP16_SWITCH(!params.is_bf16, [&] {
         HEADDIM_SWITCH(params.d, [&] {
             BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-                run_mha_bwd_<elem_type, kHeadDim, Is_causal>(params, stream);
+                BOOL_SWITCH(params.attn_range_min_ptr1 != nullptr, Has_range, [&] {
+                    BOOL_SWITCH(Has_range && params.attn_range_min_ptr2 != nullptr, Has_two_ranges, [&] {
+                        run_mha_bwd_<elem_type, kHeadDim, Is_causal, Has_range, Has_two_ranges>(params, stream);
+                    });
+                });
             });
         });
     });
@@ -1136,6 +1139,7 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size or n
                c10::optional<at::Tensor> &dv_,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size_k if there's a block_table.
                const at::Tensor &cu_seqlens_q,  // b+1
                const at::Tensor &cu_seqlens_k,  // b+1
+               c10::optional<at::Tensor> &attn_range_, // int tensor of shape (2, sum(q_seqlens)) or (2, 2, sum(q_seqlens)) (if we have two ranges)
                c10::optional<at::Tensor> &block_table_q_,  // b x max_num_blocks_per_seq_q
                c10::optional<at::Tensor> &block_table_kv_,  // b x max_num_blocks_per_seq_kv
                c10::optional<at::Tensor> &block_table_out_,  // b x max_num_blocks_per_seq_out
@@ -1472,6 +1476,50 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size or n
         params.page_block_size_dkv = page_block_size_dkv;
     } else {
         params.block_table_dkv = nullptr;
+    }
+
+    at::Tensor attn_range_min_1;
+    at::Tensor attn_range_max_1;
+    at::Tensor attn_range_min_2;
+    at::Tensor attn_range_max_2;
+    if (attn_range_.has_value()) {
+        // check attn range size
+        at::Tensor attn_range1 = attn_range_.value();
+        at::Tensor attn_range2;
+        TORCH_CHECK(attn_range1.dtype() == torch::kInt32, "attn_range must have dtype int32");
+        CHECK_DEVICE(attn_range1);
+        if (attn_range1.dim() == 2) {
+            CHECK_SHAPE(attn_range1, 2, total_q);
+            TORCH_CHECK(attn_range1.is_contiguous(), "attn_range must be contiguous");
+            attn_range_min_1 = attn_range1[0];
+            attn_range_max_1 = attn_range1[1];
+            params.attn_range_min_ptr1 = attn_range_min_1.data_ptr<int>();
+            params.attn_range_max_ptr1 = attn_range_max_1.data_ptr<int>();
+            params.attn_range_min_ptr2 = nullptr;
+            params.attn_range_max_ptr2 = nullptr;
+            // std::cout << "attn_range_min1: " << attn_range_min_1 << std::endl;
+            // std::cout << "attn_range_max1: " << attn_range_max_1 << std::endl;
+        } else {
+            TORCH_CHECK(attn_range1.dim() == 3, "attn_range must have size 2 or 3");
+            CHECK_SHAPE(attn_range1, 2, 2, total_q);
+            attn_range2 = attn_range1[1]; // note the order, don't overwrite attn_range1
+            attn_range1 = attn_range1[0];
+            TORCH_CHECK(attn_range1.is_contiguous(), "attn_range must be contiguous");
+            TORCH_CHECK(attn_range2.is_contiguous(), "attn_range must be contiguous");
+            attn_range_min_1 = attn_range1[0];
+            attn_range_max_1 = attn_range1[1];
+            attn_range_min_2 = attn_range2[0];
+            attn_range_max_2 = attn_range2[1];
+            params.attn_range_min_ptr1 = attn_range_min_1.data_ptr<int>();
+            params.attn_range_max_ptr1 = attn_range_max_1.data_ptr<int>();
+            params.attn_range_min_ptr2 = attn_range_min_2.data_ptr<int>();
+            params.attn_range_max_ptr2 = attn_range_max_2.data_ptr<int>();
+        }
+    } else {
+        params.attn_range_min_ptr1 = nullptr;
+        params.attn_range_max_ptr1 = nullptr;
+        params.attn_range_min_ptr2 = nullptr;
+        params.attn_range_max_ptr2 = nullptr;
     }
 
     auto launch = &run_mha_bwd;

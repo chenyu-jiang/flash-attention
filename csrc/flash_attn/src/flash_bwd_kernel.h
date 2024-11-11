@@ -76,7 +76,7 @@ make_tiled_copy_C_warpcontiguousN(Copy_Atom<Args...> const& copy_atom,
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, bool Is_first, bool Is_last, bool Seq_parallel=false, typename Params>
+template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, bool Is_first, bool Is_last, bool Has_range, bool Has_two_ranges, bool Seq_parallel=false, typename Params>
 inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const int bidb, const int bidh, const int n_block) {
 
     using Element = typename Kernel_traits::Element;
@@ -95,6 +95,8 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     constexpr int MMA_N_SdP = kBlockN / decltype(typename Kernel_traits::TiledMmaSdP{}.template tile_size_mnk<1>())::value;
     constexpr int AtomLayoutMS = Kernel_traits::AtomLayoutMSdP;
     constexpr bool Double_buffer = !Kernel_traits::No_double_buffer;
+    constexpr int kNThreads = Kernel_traits::kNThreads;
+    constexpr int kNWarps = Kernel_traits::kNWarps;
 
     const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
     if (n_block * kBlockN >= binfo.actual_seqlen_k) return;
@@ -102,6 +104,76 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     int m_block_max = cute::ceil_div(binfo.actual_seqlen_q, kBlockM);
     if (Is_local) {
         m_block_max = std::min(m_block_max, cute::ceil_div((n_block + 1) * kBlockN + binfo.actual_seqlen_q - binfo.actual_seqlen_k + params.window_size_left, kBlockM));
+    }
+    int m_block_min = (!Is_causal && !Is_local)
+        ? 0
+        : std::max(0, (n_block * kBlockN + binfo.actual_seqlen_q - binfo.actual_seqlen_k - params.window_size_right) / kBlockM);
+    if (Has_range) {
+        // calculate max row_idx
+        int n_rounds = cute::ceil_div(binfo.actual_seqlen_q, kNThreads);
+        int min_col_idx = n_block * kBlockN;
+        int max_col_idx = min_col_idx + kBlockN;
+        int max_row_idx = -1;
+        int min_row_idx = binfo.actual_seqlen_q;
+        for (int i = 0; i < n_rounds; ++i) {
+            int assigned_row_idx = i * kNThreads + tidx;
+            int min_col_range = assigned_row_idx >= binfo.actual_seqlen_q ? 0 : params.attn_range_min_ptr1[binfo.q_offset(params.seqlen_q, 1, bidb) + assigned_row_idx];
+            int max_col_range = assigned_row_idx >= binfo.actual_seqlen_q ? 0 : params.attn_range_max_ptr1[binfo.q_offset(params.seqlen_q, 1, bidb) + assigned_row_idx];
+            bool can_skip = (min_col_idx >= max_col_range || max_col_idx <= min_col_range);
+            int local_row_idx = can_skip ? 0 : assigned_row_idx;
+            max_row_idx = std::max(max_row_idx, local_row_idx);
+            min_row_idx = std::min(min_row_idx, local_row_idx);
+            // allreduce max across threads
+            // intra-warp
+            int warp_idx = tidx / 32;
+            int lane_idx = tidx % 32;
+            for (int offset = 16; offset > 0; offset /= 2) {
+                max_row_idx = std::max(max_row_idx, __shfl_xor_sync(0xffffffff, max_row_idx, offset, 32));
+                min_row_idx = std::min(min_row_idx, __shfl_xor_sync(0xffffffff, min_row_idx, offset, 32));
+            }
+            if (lane_idx == 0) {
+                smem_[warp_idx] = max_row_idx;
+                smem_[warp_idx + kNWarps] = min_row_idx;
+            }
+            __syncthreads();
+            for (int n=0; n< kNWarps; n++) {
+                max_row_idx = max(max_row_idx, smem_[n]);
+                min_row_idx = min(min_row_idx, smem_[n + kNWarps]);
+            }
+            __syncthreads();
+        }
+        if (Has_two_ranges) {
+            // repeat for the second range
+            for (int i = 0; i < n_rounds; ++i) {
+                int assigned_row_idx = i * kNThreads + tidx;
+                int min_col_range = assigned_row_idx >= binfo.actual_seqlen_q ? 0 : params.attn_range_min_ptr2[binfo.q_offset(params.seqlen_q, 1, bidb) + assigned_row_idx];
+                int max_col_range = assigned_row_idx >= binfo.actual_seqlen_q ? 0 : params.attn_range_max_ptr2[binfo.q_offset(params.seqlen_q, 1, bidb) + assigned_row_idx];
+                bool can_skip = (min_col_idx >= max_col_range || max_col_idx <= min_col_range);
+                int local_row_idx = can_skip ? 0 : assigned_row_idx;
+                max_row_idx = std::max(max_row_idx, local_row_idx);
+                min_row_idx = std::min(min_row_idx, local_row_idx);
+                // allreduce max across threads
+                // intra-warp
+                int warp_idx = tidx / 32;
+                int lane_idx = tidx % 32;
+                for (int offset = 16; offset > 0; offset /= 2) {
+                    max_row_idx = std::max(max_row_idx, __shfl_xor_sync(0xffffffff, max_row_idx, offset, 32));
+                    min_row_idx = std::min(min_row_idx, __shfl_xor_sync(0xffffffff, min_row_idx, offset, 32));
+                }
+                if (lane_idx == 0) {
+                    smem_[warp_idx] = max_row_idx;
+                    smem_[warp_idx + kNWarps] = min_row_idx;
+                }
+                __syncthreads();
+                for (int n=0; n< kNWarps; n++) {
+                    max_row_idx = max(max_row_idx, smem_[n]);
+                    min_row_idx = min(min_row_idx, smem_[n + kNWarps]);
+                }
+                __syncthreads();
+            }
+        }
+        m_block_max = std::min(m_block_max, cute::ceil_div(max_row_idx + 1, kBlockM));
+        m_block_min = std::max(m_block_min, min_row_idx / kBlockM);
     }
 
     const int *block_table_q = params.block_table_q == nullptr ? nullptr : params.block_table_q + bidb * params.block_table_batch_stride_q;
@@ -346,9 +418,6 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     tdQgdQaccum.data() = tdQgdQaccum.data() + kBlockM * params.h * params.d_rounded;
 
     int m_block = m_block_max - 1;
-    int m_block_min = (!Is_causal && !Is_local)
-        ? 0
-        : std::max(0, (n_block * kBlockN + binfo.actual_seqlen_q - binfo.actual_seqlen_k - params.window_size_right) / kBlockM);
     // If not local, we're guaranteed that m_block_min <= m_block:
     // We checked earlier that n_block * kBlockN < actual_seqlen_k, so in the causal case,
     // n_block * kBlockN + binfo.actual_seqlen_q - binfo.actual_seqlen_k < actual_seqlen_q.
@@ -361,7 +430,7 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     // Otherwise we get wrong result for the case where we don't enter the for loop.
     // And we might read OOB elements from gQ and gdO.
     // This also covers the case where actual_seqlen_q == 0
-    if ((Is_local || !Is_even_MN) && m_block < m_block_min) {
+    if ((Is_local || !Is_even_MN || Has_range) && m_block < m_block_min) {
         const int *block_table_dkv = params.block_table_dkv == nullptr ? nullptr : params.block_table_dkv + bidb * params.block_table_batch_stride_dkv;
         const int block_table_dkv_idx = block_table_dkv == nullptr ? 0 : n_block * kBlockN / params.page_block_size_dkv;
         const int block_table_dkv_offset = block_table_dkv == nullptr ? 0 : n_block * kBlockN - block_table_dkv_idx * params.page_block_size_dkv;
@@ -566,6 +635,24 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
                                         params.window_size_left, params.window_size_right);
             }
 
+        } else if (Has_range) {
+            if (Has_two_ranges) {
+                flash::apply_mask_2ranges(scores, n_block * kBlockN + (tidx / 32 / AtomLayoutMS) * MMA_N_SdP * 16,
+                        binfo.actual_seqlen_k, m_block * kBlockM + get<0>(taccScS_row(0)),
+                        binfo.actual_seqlen_q, AtomLayoutMS * 16,
+                        params.attn_range_min_ptr1 + binfo.q_offset(params.seqlen_q, 1, bidb),
+                        params.attn_range_max_ptr1 + binfo.q_offset(params.seqlen_q, 1, bidb),
+                        params.attn_range_min_ptr2 + binfo.q_offset(params.seqlen_q, 1, bidb),
+                        params.attn_range_max_ptr2 + binfo.q_offset(params.seqlen_q, 1, bidb)
+                );
+            } else {
+                flash::apply_mask_range(scores, n_block * kBlockN + (tidx / 32 / AtomLayoutMS) * MMA_N_SdP * 16,
+                        binfo.actual_seqlen_k, m_block * kBlockM + get<0>(taccScS_row(0)),
+                        binfo.actual_seqlen_q, AtomLayoutMS * 16,
+                        params.attn_range_min_ptr1 + binfo.q_offset(params.seqlen_q, 1, bidb),
+                        params.attn_range_max_ptr1 + binfo.q_offset(params.seqlen_q, 1, bidb)
+                );
+            }
         }
 
         // if (cute::thread(32, 0)) { print(scores); }
@@ -926,7 +1013,7 @@ inline __device__ void compute_dq_dk_dv(const Params &params) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, typename Params>
+template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, bool Has_range, bool Has_two_ranges, typename Params>
 inline __device__ void compute_dq_dk_dv_seqk_parallel(const Params &params) {
 
     // The block index for the batch.
@@ -936,7 +1023,7 @@ inline __device__ void compute_dq_dk_dv_seqk_parallel(const Params &params) {
 
     // If deterministic, each thread block will do atomicAdd to a different dQ_accum buffer.
     for (int n_block = blockIdx.x; n_block < (params.seqlen_k + Kernel_traits::kBlockN - 1) / Kernel_traits::kBlockN; n_block += gridDim.x) {
-        compute_dq_dk_dv_1colblock<Kernel_traits, Is_dropout, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Is_softcap, false, false, /*Seq_parallel=*/true>(params, bidb, bidh, n_block);
+        compute_dq_dk_dv_1colblock<Kernel_traits, Is_dropout, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Is_softcap, false, false, Has_range, Has_two_ranges, /*Seq_parallel=*/true>(params, bidb, bidh, n_block);
     }
 }
 

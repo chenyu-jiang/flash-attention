@@ -80,6 +80,83 @@ __forceinline__ __device__ void apply_mask_causal(Tensor<Engine, Layout> &tensor
                                           max_seqlen_q, warp_row_stride, -1, 0);
 }
 
+template <typename Engine, typename Layout>
+__forceinline__ __device__ void apply_mask_range(Tensor<Engine, Layout> &tensor, const int col_idx_offset_,
+                                         const int max_seqlen_k, const int row_idx_offset,
+                                         const int max_seqlen_q, const int warp_row_stride,
+                                         const int* attn_range_min_ptr, const int* attn_range_max_ptr) {
+    // tensor has shape (nrow=(2, MMA_M), ncol=(2, MMA_N))
+    static_assert(Layout::rank == 2, "Only support 2D Tensor");
+    const int lane_id = threadIdx.x % 32;
+    const int col_idx_offset = col_idx_offset_ + (lane_id % 4) * 2;
+    #pragma unroll
+    for (int mi = 0; mi < size<0, 1>(tensor); ++mi) {
+        const int row_idx_base = row_idx_offset + mi * warp_row_stride;
+        #pragma unroll
+        for (int i = 0; i < size<0, 0>(tensor); ++i) {
+            const int row_idx = row_idx_base + i * 8;
+            const int col_idx_limit_left = std::max(0, attn_range_min_ptr[row_idx]);
+            const int col_idx_limit_right = std::min(max_seqlen_k, attn_range_max_ptr[row_idx]);
+            #pragma unroll
+            for (int nj = 0; nj < size<1, 1>(tensor); ++nj) {
+                const int col_idx_base = col_idx_offset + nj * 8;
+                #pragma unroll
+                for (int j = 0; j < size<1, 0>(tensor); ++j) {
+                    const int col_idx = col_idx_base + j;
+                    if (col_idx >= col_idx_limit_right || col_idx < col_idx_limit_left) {
+                        tensor(make_coord(i, mi), make_coord(j, nj)) = -INFINITY;
+                    }
+                }
+            }
+            // if (cute::thread0()) {
+            //     printf("mi = %d, i = %d, row_idx = %d, max_seqlen_k = %d\n", mi, i, row_idx, max_seqlen_k);
+            //     print(tensor(make_coord(i, mi), _));
+            //     // print(tensor(_, j + nj * size<1, 0>(tensor)));
+            // }
+        }
+    }
+}
+
+template <typename Engine, typename Layout>
+__forceinline__ __device__ void apply_mask_2ranges(Tensor<Engine, Layout> &tensor, const int col_idx_offset_,
+                                         const int max_seqlen_k, const int row_idx_offset,
+                                         const int max_seqlen_q, const int warp_row_stride,
+                                         const int* attn_range_min_ptr1, const int* attn_range_max_ptr1,
+                                         const int* attn_range_min_ptr2, const int* attn_range_max_ptr2) {
+    // tensor has shape (nrow=(2, MMA_M), ncol=(2, MMA_N))
+    static_assert(Layout::rank == 2, "Only support 2D Tensor");
+    const int lane_id = threadIdx.x % 32;
+    const int col_idx_offset = col_idx_offset_ + (lane_id % 4) * 2;
+    #pragma unroll
+    for (int mi = 0; mi < size<0, 1>(tensor); ++mi) {
+        const int row_idx_base = row_idx_offset + mi * warp_row_stride;
+        #pragma unroll
+        for (int i = 0; i < size<0, 0>(tensor); ++i) {
+            const int row_idx = row_idx_base + i * 8;
+            const int col_idx_limit_left1 = std::max(0, attn_range_min_ptr1[row_idx]);
+            const int col_idx_limit_right1 = std::min(max_seqlen_k, attn_range_max_ptr1[row_idx]);
+            const int col_idx_limit_left2 = std::max(0, attn_range_min_ptr2[row_idx]);
+            const int col_idx_limit_right2 = std::min(max_seqlen_k, attn_range_max_ptr2[row_idx]);
+            #pragma unroll
+            for (int nj = 0; nj < size<1, 1>(tensor); ++nj) {
+                const int col_idx_base = col_idx_offset + nj * 8;
+                #pragma unroll
+                for (int j = 0; j < size<1, 0>(tensor); ++j) {
+                    const int col_idx = col_idx_base + j;
+                    if ((col_idx >= col_idx_limit_right1 && col_idx < col_idx_limit_left2) || col_idx >= col_idx_limit_right2 || col_idx < col_idx_limit_left1) {
+                        tensor(make_coord(i, mi), make_coord(j, nj)) = -INFINITY;
+                    }
+                }
+            }
+            // if (cute::thread0()) {
+            //     printf("mi = %d, i = %d, row_idx = %d, max_seqlen_k = %d\n", mi, i, row_idx, max_seqlen_k);
+            //     print(tensor(make_coord(i, mi), _));
+            //     // print(tensor(_, j + nj * size<1, 0>(tensor)));
+            // }
+        }
+    }
+}
+
 template <typename Engine0, typename Layout0, typename Engine1, typename Layout1>
 __forceinline__ __device__ void apply_mask_causal_w_idx(
     Tensor<Engine0, Layout0> &tensor, Tensor<Engine1, Layout1> const &idx_rowcol,

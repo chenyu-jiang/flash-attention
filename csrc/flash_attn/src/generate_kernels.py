@@ -35,8 +35,8 @@ template void run_mha_fwd_splitkv_dispatch<{DTYPE}, {HEAD_DIM}, {IS_CAUSAL}, {HA
 KERNEL_IMPL_TEMPLATE_BWD = """#include "flash_bwd_launch_template.h"
 
 template<>
-void run_mha_bwd_<{DTYPE}, {HEAD_DIM}, {IS_CAUSAL}>(Flash_bwd_params &params, cudaStream_t stream) {{
-    run_mha_bwd_hdim{HEAD_DIM}<{DTYPE}, {IS_CAUSAL}>(params, stream);
+void run_mha_bwd_<{DTYPE}, {HEAD_DIM}, {IS_CAUSAL}, {HAS_RANGE}, {HAS_TWO_RANGES}>(Flash_bwd_params &params, cudaStream_t stream) {{
+    run_mha_bwd_hdim{HEAD_DIM}<{DTYPE}, {IS_CAUSAL}, {HAS_RANGE}, {HAS_TWO_RANGES}>(params, stream);
 }}
 """
 
@@ -59,7 +59,7 @@ class Kernel:
             )
         elif self.direction == "bwd":
             return KERNEL_IMPL_TEMPLATE_BWD.format(
-                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, IS_CAUSAL=self.is_causal, 
+                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, IS_CAUSAL=self.is_causal, HAS_RANGE=self.has_range, HAS_TWO_RANGES=self.has_two_ranges
             )
         else:
             return KERNEL_IMPL_TEMPLATE_FWD_SPLIT.format(
@@ -76,8 +76,18 @@ def get_all_kernels() -> List[Kernel]:
         for dtype, head_dim, is_causal, sm in itertools.product(DTYPE_MAP.keys(), HEAD_DIMENSIONS, IS_CAUSAL, SM):
             if direction == "fwd_split":
                 for has_range in HAS_RANGE:
+                    if has_range == 'true' and is_causal == 'true':
+                        continue
                     for has_two_ranges in HAS_TWO_RANGES:
-                        if has_two_ranges and not has_range:
+                        if has_two_ranges == 'true' and not has_range == 'true':
+                            continue
+                        yield Kernel(sm=sm, dtype=dtype, head_dim=head_dim, is_causal=is_causal, direction=direction, has_range=has_range, has_two_ranges=has_two_ranges)
+            elif direction == "bwd":
+                for has_range in HAS_RANGE:
+                    if has_range == 'true' and is_causal == 'true':
+                        continue
+                    for has_two_ranges in HAS_TWO_RANGES:
+                        if has_two_ranges == 'true' and not has_range == 'true':
                             continue
                         yield Kernel(sm=sm, dtype=dtype, head_dim=head_dim, is_causal=is_causal, direction=direction, has_range=has_range, has_two_ranges=has_two_ranges)
             else:
