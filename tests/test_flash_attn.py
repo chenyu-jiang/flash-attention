@@ -130,9 +130,9 @@ def generate_qkv(
                 for i in range(sl_q):
                     # first range, 0 to 16
                     range1_start = 0
-                    range1_end = min(16, raw_seqlens_k[b]) + 1
+                    range1_end = min(17, raw_seqlens_k[b])
                     range2_start = max(0, i - 16)
-                    range2_end = max(min(raw_seqlens_k[b] + 1, i + 17), range2_start)
+                    range2_end = max(min(raw_seqlens_k[b], i + 17), range2_start)
                     mask_ranges[0, 0, cu_seqlens_q[b].item() + i] = range1_start
                     mask_ranges[0, 1, cu_seqlens_q[b].item() + i] = range1_end
                     # second range, windowed with 16 each side
@@ -1933,9 +1933,6 @@ def test_flash_attn_varlen_block_table(
     print(f"Pytorch max diff with Ref: {(out_pt - out_ref).abs().max().item()}")
     print(f"Pytorch mean diff with Ref: {(out_pt - out_ref).abs().mean().item()}")
 
-    # import code
-    # code.interact(local=locals())
-    # exit(0)
     # backward
     # blocked
     (

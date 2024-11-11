@@ -224,7 +224,7 @@ struct Mask {
             #pragma unroll
             for (int i = 0; i < size<0, 0>(tensor); ++i) {
                 const int col_idx_limit_left = range_min(mi, i);
-                const int col_idx_limit_right = range_max(mi, i);
+                const int col_idx_limit_right = std::min(range_max(mi, i), max_seqlen_k);
                 #pragma unroll
                 for (int nj = 0; nj < size<1, 1>(tensor); ++nj) {
                     const int col_idx_base = col_idx_offset + nj * 8;
@@ -258,9 +258,9 @@ struct Mask {
             #pragma unroll
             for (int i = 0; i < size<0, 0>(tensor); ++i) {
                 const int col_idx_limit_left1 = range_min1(mi, i);
-                const int col_idx_limit_right1 = range_max1(mi, i);
+                const int col_idx_limit_right1 = std::min(range_max1(mi, i), max_seqlen_k);
                 const int col_idx_limit_left2 = range_min2(mi, i);
-                const int col_idx_limit_right2 = range_max2(mi, i);
+                const int col_idx_limit_right2 = std::min(range_max2(mi, i), max_seqlen_k);
                 #pragma unroll
                 for (int nj = 0; nj < size<1, 1>(tensor); ++nj) {
                     const int col_idx_base = col_idx_offset + nj * 8;

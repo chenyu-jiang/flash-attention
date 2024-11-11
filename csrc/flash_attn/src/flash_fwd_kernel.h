@@ -633,7 +633,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         // if (tidx == 0) {
         //     printf("bidb = %d, bidh = %d, m_block = %d, n_split_idx = %d, n_block_min = %d, n_block_max = %d, max_col_id_range1_for_curr_mblock = %d, min_col_id_range2_for_curr_mblock = %d, n_block_skip_start = %d, n_block_skip_end = %d\n", bidb, bidh, m_block, n_split_idx, n_block_min, n_block_max, max_col_id_range1_for_curr_mblock, min_col_id_range2_for_curr_mblock, n_block_skip_start, n_block_skip_end);
         // }
-        __syncthreads();
+        // __syncthreads();
     }
     // if (tidx == 0) {
     //     printf("bidb = %d, bidh = %d, m_block = %d, n_split_idx = %d, n_block_min = %d, n_block_max = %d, n_block_skip_start = %d, n_block_skip_end = %d\n", bidb, bidh, m_block, n_split_idx, n_block_min, n_block_max, n_block_skip_start, n_block_skip_end);
@@ -1119,13 +1119,56 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                     : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/true>(acc_s, acc_o, params.scale_softmax_log2);
                 // if (cute::thread0()) { print(scores_max); print(scores_sum); print(scores); }
 
+                // if (cutlass::isnan(acc_s(0,0,0))) {
+                //     printf("(b%d, h%d, m%d, thx%d): Masking step: %d, n_block: %d, acc_s is nan\n", bidb, bidh, m_block, tidx, masking_step, n_block);
+                //     for (int i = 0; i < shape0; i ++) {
+                //         const int row_idx_base = row_idx_offset + i * warp_row_stride;
+                //         #pragma unroll
+                //         for (int j=0; j < shape1; j++) {
+                //             const int row_idx = row_idx_base + j * 8;
+                //             printf("(b%d, h%d, m%d, spl%d, t%d): row_idx: %d, min1: %d, max1: %d, min2: %d, max2: %d\n", bidb, bidh, m_block, n_split_idx, tidx, m_block * kBlockM + row_idx, tRangeMin(i, j), tRangeMax(i, j), tRangeMin2(i, j), tRangeMax2(i, j));
+                //         }
+                //     }
+                // }
+
                 // Convert acc_s from fp32 to fp16/bf16
                 Tensor rP = flash::convert_type<Element>(acc_s);
+
+                // if (cutlass::isnan(rP(0,0,0))) {
+                //     printf("(b%d, h%d, m%d, thx%d): Masking step: %d, n_block: %d, rP is nan\n", bidb, bidh, m_block, tidx, masking_step, n_block);
+                //     for (int i=0; i < size<0>(rP); i++) {
+                //         for (int j=0; j < size<1>(rP); j++) {
+                //             for (int k=0; k < size<2>(rP); k++) {
+                //                 printf("(b%d, h%d, m%d, thx%d): rP(%d, %d, %d): %f\n", bidb, bidh, m_block, tidx, i, j, k, rP(i, j, k));
+                //             }
+                //         }
+                //     }
+                //     for (int i = 0; i < shape0; i ++) {
+                //         const int row_idx_base = row_idx_offset + i * warp_row_stride;
+                //         #pragma unroll
+                //         for (int j=0; j < shape1; j++) {
+                //             const int row_idx = row_idx_base + j * 8;
+                //             printf("(b%d, h%d, m%d, spl%d, t%d): row_idx: %d, min1: %d, max1: %d, min2: %d, max2: %d\n", bidb, bidh, m_block, n_split_idx, tidx, m_block * kBlockM + row_idx, tRangeMin(i, j), tRangeMax(i, j), tRangeMin2(i, j), tRangeMax2(i, j));
+                //         }
+                //     }
+                // }
                 // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
                 // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
                 Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
 
                 flash::gemm_rs(acc_o, tOrP, tOrVt, tOsVt, tiled_mma, smem_tiled_copy_V, smem_thr_copy_V);
+
+                // if (cutlass::isnan(acc_o(0,0,0))) {
+                //     printf("(b%d, h%d, m%d, thx%d): Masking step: %d, n_block: %d, acc_o is nan\n", bidb, bidh, m_block, tidx, masking_step, n_block);
+                //     for (int i = 0; i < shape0; i ++) {
+                //         const int row_idx_base = row_idx_offset + i * warp_row_stride;
+                //         #pragma unroll
+                //         for (int j=0; j < shape1; j++) {
+                //             const int row_idx = row_idx_base + j * 8;
+                //             printf("(b%d, h%d, m%d, spl%d, t%d): row_idx: %d, min1: %d, max1: %d, min2: %d, max2: %d\n", bidb, bidh, m_block, n_split_idx, tidx, m_block * kBlockM + row_idx, tRangeMin(i, j), tRangeMax(i, j), tRangeMin2(i, j), tRangeMax2(i, j));
+                //         }
+                //     }
+                // }
 
                 // This check is at the end of the loop since we always have at least 1 iteration
                 if (n_masking_steps > 1 && n_block <= n_block_min) {
@@ -1197,6 +1240,10 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 Tensor tOrP = make_tensor(rP.data(), flash::convert_layout_acc_Aregs<Kernel_traits::TiledMma>(rP.layout()));
 
                 flash::gemm_rs(acc_o, tOrP, tOrVt, tOsVt, tiled_mma, smem_tiled_copy_V, smem_thr_copy_V);
+
+                // if (cutlass::isnan(acc_o(0,0,0))) {
+                //     printf("(b%d, h%d, m%d, thx%d): Non-masking step, n_block: %d, acc_o is nan\n", bidb, bidh, m_block, tidx, n_block);
+                // }
 
                 last_n_block = n_block;
                 n_block = next_n_block;
