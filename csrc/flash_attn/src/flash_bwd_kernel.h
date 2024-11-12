@@ -120,9 +120,13 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
             int min_col_range = assigned_row_idx >= binfo.actual_seqlen_q ? 0 : params.attn_range_min_ptr1[binfo.q_offset(params.seqlen_q, 1, bidb) + assigned_row_idx];
             int max_col_range = assigned_row_idx >= binfo.actual_seqlen_q ? 0 : params.attn_range_max_ptr1[binfo.q_offset(params.seqlen_q, 1, bidb) + assigned_row_idx];
             bool can_skip = (min_col_idx >= max_col_range || max_col_idx <= min_col_range);
-            int local_row_idx = can_skip ? 0 : assigned_row_idx;
-            max_row_idx = std::max(max_row_idx, local_row_idx);
-            min_row_idx = std::min(min_row_idx, local_row_idx);
+            int local_max_row_idx = can_skip ? 0 : assigned_row_idx;
+            int local_min_row_idx = can_skip ? binfo.actual_seqlen_q : assigned_row_idx;
+            max_row_idx = std::max(max_row_idx, local_max_row_idx);
+            min_row_idx = std::min(min_row_idx, local_min_row_idx);
+            // if(bidb == 0 && bidh == 0 && tidx == 0 && n_block == 0) {
+            //     printf("FIRST BLOCK: round %d, assigned_row_idx %d, min_col_range %d, max_col_range %d, local_max_row_idx %d, local_min_row_idx %d, current max_row_idx %d, current min_row_idx %d\n", i, assigned_row_idx, min_col_range, max_col_range, local_max_row_idx, local_min_row_idx, max_row_idx, min_row_idx);
+            // }
             // allreduce max across threads
             // intra-warp
             int warp_idx = tidx / 32;
@@ -132,13 +136,13 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
                 min_row_idx = std::min(min_row_idx, __shfl_xor_sync(0xffffffff, min_row_idx, offset, 32));
             }
             if (lane_idx == 0) {
-                smem_[warp_idx] = max_row_idx;
-                smem_[warp_idx + kNWarps] = min_row_idx;
+                reinterpret_cast<int *>(smem_)[warp_idx] = max_row_idx;
+                reinterpret_cast<int *>(smem_)[warp_idx + kNWarps] = min_row_idx;
             }
             __syncthreads();
             for (int n=0; n< kNWarps; n++) {
-                max_row_idx = max(max_row_idx, smem_[n]);
-                min_row_idx = min(min_row_idx, smem_[n + kNWarps]);
+                max_row_idx = std::max(max_row_idx, reinterpret_cast<int *>(smem_)[n]);
+                min_row_idx = std::min(min_row_idx, reinterpret_cast<int *>(smem_)[n + kNWarps]);
             }
             __syncthreads();
         }
@@ -149,9 +153,10 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
                 int min_col_range = assigned_row_idx >= binfo.actual_seqlen_q ? 0 : params.attn_range_min_ptr2[binfo.q_offset(params.seqlen_q, 1, bidb) + assigned_row_idx];
                 int max_col_range = assigned_row_idx >= binfo.actual_seqlen_q ? 0 : params.attn_range_max_ptr2[binfo.q_offset(params.seqlen_q, 1, bidb) + assigned_row_idx];
                 bool can_skip = (min_col_idx >= max_col_range || max_col_idx <= min_col_range);
-                int local_row_idx = can_skip ? 0 : assigned_row_idx;
-                max_row_idx = std::max(max_row_idx, local_row_idx);
-                min_row_idx = std::min(min_row_idx, local_row_idx);
+                int local_max_row_idx = can_skip ? 0 : assigned_row_idx;
+                int local_min_row_idx = can_skip ? binfo.actual_seqlen_q : assigned_row_idx;
+                max_row_idx = std::max(max_row_idx, local_max_row_idx);
+                min_row_idx = std::min(min_row_idx, local_min_row_idx);
                 // allreduce max across threads
                 // intra-warp
                 int warp_idx = tidx / 32;
@@ -161,19 +166,22 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
                     min_row_idx = std::min(min_row_idx, __shfl_xor_sync(0xffffffff, min_row_idx, offset, 32));
                 }
                 if (lane_idx == 0) {
-                    smem_[warp_idx] = max_row_idx;
-                    smem_[warp_idx + kNWarps] = min_row_idx;
+                    reinterpret_cast<int *>(smem_)[warp_idx] = max_row_idx;
+                    reinterpret_cast<int *>(smem_)[warp_idx + kNWarps] = min_row_idx;
                 }
                 __syncthreads();
                 for (int n=0; n< kNWarps; n++) {
-                    max_row_idx = max(max_row_idx, smem_[n]);
-                    min_row_idx = min(min_row_idx, smem_[n + kNWarps]);
+                    max_row_idx = max(max_row_idx, reinterpret_cast<int *>(smem_)[n]);
+                    min_row_idx = min(min_row_idx, reinterpret_cast<int *>(smem_)[n + kNWarps]);
                 }
                 __syncthreads();
             }
         }
         m_block_max = std::min(m_block_max, cute::ceil_div(max_row_idx + 1, kBlockM));
         m_block_min = std::max(m_block_min, min_row_idx / kBlockM);
+        // if(tidx == 0) {
+        //     printf("(bidb %d bidh %d n_block %d): max_row_idx %d, min_row_idx %d, m_block_max %d, m_block_min %d\n", bidb, bidh, n_block, max_row_idx, min_row_idx, m_block_max, m_block_min);
+        // }
     }
 
     const int *block_table_q = params.block_table_q == nullptr ? nullptr : params.block_table_q + bidb * params.block_table_batch_stride_q;
@@ -607,7 +615,7 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         // However, it's possible that the values in acc_s are so large that they overflow
         // when we multiply with dP and convert to fp16, resulting in Inf in dS and NaNs in dQ.
         // So we need to mask out the elements beyond actual_seqlen_k.
-        if (!Is_causal && !Is_local) {
+        if (!Is_causal && !Is_local && !Has_range) {
             if (!Is_even_MN && (n_block + 1) * kBlockN >= binfo.actual_seqlen_k) {
                 flash::apply_mask(scores, binfo.actual_seqlen_k,
                                   n_block * kBlockN + (tidx / 32 / AtomLayoutMS) * MMA_N_SdP * 16);

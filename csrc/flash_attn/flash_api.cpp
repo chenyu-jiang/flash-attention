@@ -902,7 +902,7 @@ void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
             BOOL_SWITCH(params.is_causal, Is_causal, [&] {
                 BOOL_SWITCH(params.attn_range_min_ptr1 != nullptr, Has_range, [&] {
                     BOOL_SWITCH(Has_range && params.attn_range_min_ptr2 != nullptr, Has_two_ranges, [&] {
-                        run_mha_bwd_<elem_type, kHeadDim, Is_causal, Has_range, Has_two_ranges>(params, stream);
+                        run_mha_bwd_<elem_type, kHeadDim, Is_causal, Has_range && !Is_causal, Has_two_ranges && !Is_causal>(params, stream);
                     });
                 });
             });

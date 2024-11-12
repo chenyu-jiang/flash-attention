@@ -108,6 +108,9 @@ __forceinline__ __device__ void apply_mask_range(Tensor<Engine, Layout> &tensor,
                     }
                 }
             }
+            // if (blockIdx.y == 0 && blockIdx.z == 0 && col_idx_offset_ < 32) {
+            //     printf("row_idx = %d, col_idx_limit_left = %d, col_idx_limit_right = %d\n", row_idx, col_idx_limit_left, col_idx_limit_right);
+            // }
             // if (cute::thread0()) {
             //     printf("mi = %d, i = %d, row_idx = %d, max_seqlen_k = %d\n", mi, i, row_idx, max_seqlen_k);
             //     print(tensor(make_coord(i, mi), _));

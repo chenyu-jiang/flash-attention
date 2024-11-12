@@ -356,6 +356,7 @@ def _flash_attn_varlen_backward(
     softcap: float,
     alibi_slopes: Optional[torch.Tensor],
     deterministic: bool,
+    attn_range: Optional[torch.Tensor] = None,
     q_block_table: Optional[torch.Tensor] = None,
     kv_block_table: Optional[torch.Tensor] = None,
     out_block_table: Optional[torch.Tensor] = None,
@@ -382,6 +383,7 @@ def _flash_attn_varlen_backward(
         dv,
         cu_seqlens_q,
         cu_seqlens_k,
+        attn_range,
         q_block_table,
         kv_block_table,
         out_block_table,
@@ -768,7 +770,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             lse_=lse_,
         )
         ctx.save_for_backward(
-            q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state, q_block_table, kv_block_table, out_block_table
+            q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state, attn_range, q_block_table, kv_block_table, out_block_table
         )
         ctx.dropout_p = dropout_p
         ctx.max_seqlen_q = max_seqlen_q
@@ -788,7 +790,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state, q_block_table, kv_block_table, out_block_table = ctx.saved_tensors
+        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state, attn_range, q_block_table, kv_block_table, out_block_table = ctx.saved_tensors
         if ctx.get_dq_block_table is not None:
             dq_block_table = ctx.get_dq_block_table()
             dq = ctx.get_dq()
@@ -832,6 +834,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             ctx.softcap,
             ctx.alibi_slopes,
             ctx.deterministic,
+            attn_range=attn_range,
             q_block_table=q_block_table,
             kv_block_table=kv_block_table,
             out_block_table=out_block_table,
@@ -841,7 +844,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
-        return tuple([dq, dkv] + [None] * 24)
+        return tuple([dq, dkv] + [None] * 25)
 
 
 class FlashAttnFunc(torch.autograd.Function):

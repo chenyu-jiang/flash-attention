@@ -1826,13 +1826,13 @@ def test_flash_attn_varlen_block_table(
         get_dq_=_get_dq_buffer,
         get_dkv_=_get_dkv_buffer,
     )
-    out_recon_blocked, sm_lse_recon_blocked = _reconstruct_blockized_out_lse(out_block_table, out_blocked, sm_lse_blocked, cu_seqlens_q)
+    out_unpad_blocked, sm_lse_unpad_blocked = _reconstruct_blockized_out_lse(out_block_table, out_blocked, sm_lse_blocked, cu_seqlens_q)
     print("==============================================")
     print("====================FORWARD===================")
     print("==============================================")
     # unblocked qkv and out
     if not masked:
-        out_unpad, sm_lse, _ = flash_attn_varlen_kvpacked_func(
+        out_unpad, sm_lse_unpad, _ = flash_attn_varlen_kvpacked_func(
             q_unpad,
             kv_unpad,
             cu_seqlens_q,
@@ -1848,12 +1848,12 @@ def test_flash_attn_varlen_block_table(
             return_attn_probs=True,
         )
         # check that the blocked and unblocked outputs are the same
-        print(f"Output max diff blocked v.s. unblocked: {(out_recon_blocked - out_unpad).abs().max().item()}")
-        print(f"Output mean diff blocked v.s. unblocked: {(out_recon_blocked - out_unpad).abs().mean().item()}")
-        print(f"Sm LSE max diff blocked v.s. unblocked: {(sm_lse_recon_blocked - sm_lse).abs().max().item()}")
-        print(f"Sm LSE mean diff blocked v.s. unblocked: {(sm_lse_recon_blocked - sm_lse).abs().mean().item()}")
+        print(f"Output max diff blocked v.s. unblocked: {(out_unpad_blocked - out_unpad).abs().max().item()}")
+        print(f"Output mean diff blocked v.s. unblocked: {(out_unpad_blocked - out_unpad).abs().mean().item()}")
+        print(f"Sm LSE max diff blocked v.s. unblocked: {(sm_lse_unpad_blocked - sm_lse_unpad).abs().max().item()}")
+        print(f"Sm LSE mean diff blocked v.s. unblocked: {(sm_lse_unpad_blocked - sm_lse_unpad).abs().mean().item()}")
     elif mask_type == "causal":
-        out_unpad, sm_lse, _ = flash_attn_varlen_kvpacked_func(
+        out_unpad, sm_lse_unpad, _ = flash_attn_varlen_kvpacked_func(
             q_unpad,
             kv_unpad,
             cu_seqlens_q,
@@ -1869,13 +1869,13 @@ def test_flash_attn_varlen_block_table(
             return_attn_probs=True,
         )
         # check that the blocked and unblocked outputs are the same
-        print(f"Output max diff blocked v.s. unblocked: {(out_recon_blocked - out_unpad).abs().max().item()}")
-        print(f"Output mean diff blocked v.s. unblocked: {(out_recon_blocked - out_unpad).abs().mean().item()}")
-        print(f"Sm LSE max diff blocked v.s. unblocked: {(sm_lse_recon_blocked - sm_lse).abs().max().item()}")
-        print(f"Sm LSE mean diff blocked v.s. unblocked: {(sm_lse_recon_blocked - sm_lse).abs().mean().item()}")
-        recon_out_unblocked = output_pad_fn(out_unpad)
+        print(f"Output max diff blocked v.s. unblocked: {(out_unpad_blocked - out_unpad).abs().max().item()}")
+        print(f"Output mean diff blocked v.s. unblocked: {(out_unpad_blocked - out_unpad).abs().mean().item()}")
+        print(f"Sm LSE max diff blocked v.s. unblocked: {(sm_lse_unpad_blocked - sm_lse_unpad).abs().max().item()}")
+        print(f"Sm LSE mean diff blocked v.s. unblocked: {(sm_lse_unpad_blocked - sm_lse_unpad).abs().mean().item()}")
+        out_padded = output_pad_fn(out_unpad)
 
-    recon_out_blocked = output_pad_fn(out_recon_blocked)
+    out_padded_blocked = output_pad_fn(out_unpad_blocked)
 
     dropout_mask = None
 
@@ -1922,14 +1922,14 @@ def test_flash_attn_varlen_block_table(
         attn_range=attn_range,
     )
 
-    print(f"Output max diff (blocked v.s. ref): {(recon_out_blocked - out_ref).abs().max().item()}")
-    print(f"Output mean diff (blocked v.s. ref): {(recon_out_blocked - out_ref).abs().mean().item()}")
+    print(f"Output max diff (blocked v.s. ref): {(out_padded_blocked - out_ref).abs().max().item()}")
+    print(f"Output mean diff (blocked v.s. ref): {(out_padded_blocked - out_ref).abs().mean().item()}")
     if not masked or mask_type == "causal":
-        print(f"Output max diff (unblocked v.s. ref): {(recon_out_unblocked - out_ref).abs().max().item()}")
-        print(f"Output mean diff (unblocked v.s. ref): {(recon_out_unblocked - out_ref).abs().mean().item()}")
+        print(f"Output max diff (unblocked v.s. ref): {(out_padded - out_ref).abs().max().item()}")
+        print(f"Output mean diff (unblocked v.s. ref): {(out_padded - out_ref).abs().mean().item()}")
     if masked and mask_type == "causal":
-        print(f"Output max diff (unblocked v.s. causal ref): {(recon_out_unblocked - out_ref_causal).abs().max().item()}")
-        print(f"Output mean diff (unblocked v.s. causal ref): {(recon_out_unblocked - out_ref_causal).abs().mean().item()}")
+        print(f"Output max diff (unblocked v.s. causal ref): {(out_padded - out_ref_causal).abs().max().item()}")
+        print(f"Output mean diff (unblocked v.s. causal ref): {(out_padded - out_ref_causal).abs().mean().item()}")
     print(f"Pytorch max diff with Ref: {(out_pt - out_ref).abs().max().item()}")
     print(f"Pytorch mean diff with Ref: {(out_pt - out_ref).abs().mean().item()}")
 
@@ -1939,22 +1939,23 @@ def test_flash_attn_varlen_block_table(
         dq_cache,
         dkv_cache,
     ) = torch.autograd.grad(out_blocked, (q_buffer, kv_buffer), dout_buffer)
-    dq_recon, dkv_recon = _reconstruct_blockized_dq_dkv(dq_block_table, dkv_block_table, dq_cache, dkv_cache, cu_seqlens_q, cu_seqlens_k)
-    dq_recon = dq_pad_fn(dq_recon)
-    dk_recon, dv_recon = dkv_pad_fn(dkv_recon).unbind(2)
+    dq_unpad_blocked, dkv_unpad_blocked = _reconstruct_blockized_dq_dkv(dq_block_table, dkv_block_table, dq_cache, dkv_cache, cu_seqlens_q, cu_seqlens_k)
+    dq_padded_blocked = dq_pad_fn(dq_unpad_blocked)
+    dk_padded_blocked, dv_padded_blocked = dkv_pad_fn(dkv_unpad_blocked).unbind(2)
 
     torch.cuda.synchronize()
     print("==============================================")
     print("===================BACKWARD===================")
     print("==============================================")
     print()
-    # unblocked
-    (
-        dq_unpad,
-        dkv_unpad,
-    ) = torch.autograd.grad(out_unpad, (q_unpad, kv_unpad), dout_unpad)
-    dq = dq_pad_fn(dq_unpad)
-    dk, dv = dkv_pad_fn(dkv_unpad).unbind(2)
+    if not masked or mask_type == "causal":
+        # unblocked
+        (
+            dq_unpad,
+            dkv_unpad,
+        ) = torch.autograd.grad(out_unpad, (q_unpad, kv_unpad), dout_unpad)
+        dq = dq_pad_fn(dq_unpad)
+        dk, dv = dkv_pad_fn(dkv_unpad).unbind(2)
 
     # ref
     dout_padded = output_pad_fn(dout_unpad)
@@ -1969,21 +1970,30 @@ def test_flash_attn_varlen_block_table(
     ) = torch.autograd.grad(out_pt, (q, kv), dout_padded)
     dk_pt, dv_pt = dkv_pt.unbind(2)
 
-    print("============= blocked v.s. unblocked =============")
-    print(f"dQ max diff: {(dq - dq_recon).abs().max().item()}")
-    print(f"dK max diff: {(dk - dk_recon).abs().max().item()}")
-    print(f"dV max diff: {(dv - dv_recon).abs().max().item()}")
-    print(f"dQ mean diff: {(dq - dq_recon).abs().mean().item()}")
-    print(f"dK mean diff: {(dk - dk_recon).abs().mean().item()}")
-    print(f"dV mean diff: {(dv - dv_recon).abs().mean().item()}")
+    if not masked or mask_type == "causal":
+        print("============= blocked v.s. unblocked =============")
+        print(f"dQ max diff: {(dq - dq_padded_blocked).abs().max().item()}")
+        print(f"dK max diff: {(dk - dk_padded_blocked).abs().max().item()}")
+        print(f"dV max diff: {(dv - dv_padded_blocked).abs().max().item()}")
+        print(f"dQ mean diff: {(dq - dq_padded_blocked).abs().mean().item()}")
+        print(f"dK mean diff: {(dk - dk_padded_blocked).abs().mean().item()}")
+        print(f"dV mean diff: {(dv - dv_padded_blocked).abs().mean().item()}")
 
-    print("============= unblocked v.s. reference =============")
-    print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
-    print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
-    print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")
-    print(f"dQ mean diff: {(dq - dq_ref).abs().mean().item()}")
-    print(f"dK mean diff: {(dk - dk_ref).abs().mean().item()}")
-    print(f"dV mean diff: {(dv - dv_ref).abs().mean().item()}")
+        print("============= unblocked v.s. reference =============")
+        print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
+        print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
+        print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")
+        print(f"dQ mean diff: {(dq - dq_ref).abs().mean().item()}")
+        print(f"dK mean diff: {(dk - dk_ref).abs().mean().item()}")
+        print(f"dV mean diff: {(dv - dv_ref).abs().mean().item()}")
+
+    print("============= blocked v.s. reference =============")
+    print(f"dQ max diff: {(dq_padded_blocked - dq_ref).abs().max().item()}")
+    print(f"dK max diff: {(dk_padded_blocked - dk_ref).abs().max().item()}")
+    print(f"dV max diff: {(dv_padded_blocked - dv_ref).abs().max().item()}")
+    print(f"dQ mean diff: {(dq_padded_blocked - dq_ref).abs().mean().item()}")
+    print(f"dK mean diff: {(dk_padded_blocked - dk_ref).abs().mean().item()}")
+    print(f"dV mean diff: {(dv_padded_blocked - dv_ref).abs().mean().item()}")
 
     print("============= pytorch v.s. reference =============")
     print(f"dQ Pytorch max diff: {(dq_pt - dq_ref).abs().max().item()}")
@@ -1995,11 +2005,11 @@ def test_flash_attn_varlen_block_table(
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.
-    assert (recon_out_blocked - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
+    assert (out_padded_blocked - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
 
-    assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
-    assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
-    assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
+    assert (dq_padded_blocked - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
+    assert (dk_padded_blocked - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
+    assert (dv_padded_blocked - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
 
 
 @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
@@ -3081,5 +3091,5 @@ if __name__ == "__main__":
     #     512, 768, 128, 0.0, False, False, False, False, "mha", torch.bfloat16, True, 0.0
     # )
     test_flash_attn_varlen_block_table(
-        2048, 2048, 64, False, 256, False, False, "mha", torch.bfloat16, 0.0, masked=True, mask_type="two_ranges"
+        2048, 1024, 64, False, 256, False, False, "mha", torch.bfloat16, 0.0, masked=True, mask_type="two_ranges"
     )

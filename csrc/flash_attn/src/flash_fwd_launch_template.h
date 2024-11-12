@@ -125,7 +125,6 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                                     C10_CUDA_CHECK(cudaFuncSetAttribute(
                                         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                                 }
-                                std::cout << "Launching splitkv kernel." << std::endl;
                                 kernel<<<grid, Kernel_traits::kNThreads, smem_size, stream>>>(params);
                                 C10_CUDA_KERNEL_LAUNCH_CHECK();
                             });
