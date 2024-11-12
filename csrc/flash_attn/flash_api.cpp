@@ -543,6 +543,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                int window_size_right,
                const float softcap,
                const bool return_softmax,
+               const bool force_split_kv,
                c10::optional<at::Generator> gen_) {
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
@@ -792,11 +793,12 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     params.page_block_size_out = page_block_size_out;
     params.num_page_blocks_out = num_blocks_out;
 
+    const bool Has_range = attn_range_.has_value();
     at::Tensor attn_range_min_1;
     at::Tensor attn_range_max_1;
     at::Tensor attn_range_min_2;
     at::Tensor attn_range_max_2;
-    if (attn_range_.has_value()) {
+    if (Has_range) {
         // check attn range size
         at::Tensor attn_range1 = attn_range_.value();
         at::Tensor attn_range2;
@@ -878,7 +880,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     if (max_seqlen_k > 0) {
         auto stream = at::cuda::getCurrentCUDAStream().stream();
         // std::cout << "params.oaccum_ptr = " << params.oaccum_ptr << std::endl;
-        run_mha_fwd(params, stream, paged_KV);
+        run_mha_fwd(params, stream, paged_KV || Has_range || force_split_kv);
     } else {
         // If seqlen_k == 0, then we have an empty tensor. We need to set the output to 0.
         out.zero_();
@@ -1478,11 +1480,12 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size or n
         params.block_table_dkv = nullptr;
     }
 
+    const bool Has_range = attn_range_.has_value();
     at::Tensor attn_range_min_1;
     at::Tensor attn_range_max_1;
     at::Tensor attn_range_min_2;
     at::Tensor attn_range_max_2;
-    if (attn_range_.has_value()) {
+    if (Has_range) {
         // check attn range size
         at::Tensor attn_range1 = attn_range_.value();
         at::Tensor attn_range2;

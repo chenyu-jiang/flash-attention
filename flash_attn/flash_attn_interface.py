@@ -164,6 +164,7 @@ def _flash_attn_varlen_forward(
     lse_: Optional[torch.Tensor] = None,
     leftpad_k: Optional[torch.Tensor] = None,
     seqused_k: Optional[torch.Tensor] = None,
+    force_split_kv: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
     out, softmax_lse, S_dmask, rng_state = flash_attn_cuda.varlen_fwd(
@@ -191,6 +192,7 @@ def _flash_attn_varlen_forward(
         window_size_right,
         softcap,
         return_softmax,
+        force_split_kv,
         None,
     )
     # if out.isnan().any() or softmax_lse.isnan().any():
@@ -734,6 +736,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         lse_,
         get_dq_,
         get_dkv_,
+        force_split_kv,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -768,6 +771,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             out_block_table=out_block_table,
             out_=out_,
             lse_=lse_,
+            force_split_kv=force_split_kv,
         )
         ctx.save_for_backward(
             q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state, attn_range, q_block_table, kv_block_table, out_block_table
@@ -844,7 +848,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
-        return tuple([dq, dkv] + [None] * 25)
+        return tuple([dq, dkv] + [None] * 26)
 
 
 class FlashAttnFunc(torch.autograd.Function):
@@ -1331,6 +1335,7 @@ def flash_attn_varlen_kvpacked_func(
     lse_=None,
     get_dq_=None,
     get_dkv_=None,
+    force_split_kv=False,
 ):
     """dropout_p should be set to 0.0 during evaluation
     If K, V are already stacked into 1 tensor, this function will be faster than
@@ -1414,6 +1419,7 @@ def flash_attn_varlen_kvpacked_func(
         lse_,
         get_dq_,
         get_dkv_,
+        force_split_kv,
     )
 
 
