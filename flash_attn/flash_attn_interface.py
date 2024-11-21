@@ -146,6 +146,7 @@ def _flash_attn_varlen_forward(
     v: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
+    total_q: int,
     max_seqlen_q: int,
     max_seqlen_k: int,
     dropout_p: float,
@@ -182,6 +183,7 @@ def _flash_attn_varlen_forward(
         kv_block_table,
         out_block_table,
         alibi_slopes,
+        total_q,
         max_seqlen_q,
         max_seqlen_k,
         dropout_p,
@@ -348,6 +350,8 @@ def _flash_attn_varlen_backward(
     dv: Optional[torch.Tensor],
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
+    total_q: int,
+    total_k: int,
     max_seqlen_q: int,
     max_seqlen_k: int,
     dropout_p: float,
@@ -392,6 +396,8 @@ def _flash_attn_varlen_backward(
         dq_block_table,
         dkv_block_table,
         alibi_slopes,
+        total_q,
+        total_k,
         max_seqlen_q,
         max_seqlen_k,
         dropout_p,
@@ -716,6 +722,8 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         kv,
         cu_seqlens_q,
         cu_seqlens_k,
+        total_q,
+        total_k,
         max_seqlen_q,
         max_seqlen_k,
         dropout_p,
@@ -755,6 +763,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             v,
             cu_seqlens_q,
             cu_seqlens_k,
+            total_q,
             max_seqlen_q,
             max_seqlen_k,
             dropout_p,
@@ -777,6 +786,8 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state, attn_range, q_block_table, kv_block_table, out_block_table
         )
         ctx.dropout_p = dropout_p
+        ctx.total_q = total_q
+        ctx.total_k = total_k
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         ctx.softmax_scale = softmax_scale
@@ -828,6 +839,8 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
             dv,
             cu_seqlens_q,
             cu_seqlens_k,
+            ctx.total_q,
+            ctx.total_k,
             ctx.max_seqlen_q,
             ctx.max_seqlen_k,
             ctx.dropout_p,
@@ -848,7 +861,7 @@ class FlashAttnVarlenKVPackedFunc(torch.autograd.Function):
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
-        return tuple([dq, dkv] + [None] * 26)
+        return tuple([dq, dkv] + [None] * 28)
 
 
 class FlashAttnFunc(torch.autograd.Function):
@@ -1315,6 +1328,8 @@ def flash_attn_varlen_kvpacked_func(
     kv,
     cu_seqlens_q,
     cu_seqlens_k,
+    total_q,
+    total_k,
     max_seqlen_q,
     max_seqlen_k,
     dropout_p=0.0,
@@ -1399,6 +1414,8 @@ def flash_attn_varlen_kvpacked_func(
         kv,
         cu_seqlens_q,
         cu_seqlens_k,
+        total_q,
+        total_k,
         max_seqlen_q,
         max_seqlen_k,
         dropout_p,

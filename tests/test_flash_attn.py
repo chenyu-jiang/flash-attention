@@ -1784,6 +1784,8 @@ def test_flash_attn_varlen_block_table(
         dkv_pad_fn,
         attn_range,
     ) = generate_qkv(q, *kv.unbind(dim=2), query_padding_mask, key_padding_mask, kvpacked=True, masked=masked, mask_type=mask_type)
+    total_q = cu_seqlens_q[-1].item()
+    total_k = cu_seqlens_k[-1].item()
     dout_unpad = torch.randn_like(q_unpad)
     q_block_table, kv_block_table, out_block_table, dq_block_table, dkv_block_table, q_buffer, kv_buffer, out, lse, dout_buffer, dq_buffer, dkv_buffer = _blockize_qkv_out(q_unpad, kv_unpad, dout_unpad, cu_seqlens_q, cu_seqlens_k, block_size, block_size)
     # print("q_block_table: ", q_block_table.size())
@@ -1806,6 +1808,8 @@ def test_flash_attn_varlen_block_table(
         kv_buffer,
         cu_seqlens_q,
         cu_seqlens_k,
+        total_q,
+        total_k,
         max_seqlen_q,
         max_seqlen_k,
         0.0,
@@ -1858,6 +1862,8 @@ def test_flash_attn_varlen_block_table(
             kv_unpad,
             cu_seqlens_q,
             cu_seqlens_k,
+            total_q,
+            total_k,
             max_seqlen_q,
             max_seqlen_k,
             0.0,

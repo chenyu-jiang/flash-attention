@@ -533,6 +533,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                c10::optional<at::Tensor> &block_table_kv_, // batch_size x max_num_blocks_per_seq
                c10::optional<at::Tensor> &block_table_out_, // batch_size x max_num_blocks_per_seq
                c10::optional<at::Tensor> &alibi_slopes_, // num_heads or b x num_heads
+               const int total_q,
                int max_seqlen_q,
                const int max_seqlen_k,
                const float p_dropout,
@@ -647,8 +648,6 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         num_heads = num_heads_k;
         cu_seqlens_q_d = nullptr;
     }
-
-    const int total_q = !paged_Q ? q.sizes()[0]: cu_seqlens_q[batch_size].item<int>();
 
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
     TORCH_CHECK(head_size <= 256, "FlashAttention forward only supports head dimension at most 256");
@@ -1148,6 +1147,8 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size or n
                c10::optional<at::Tensor> &block_table_dq_,  // b x max_num_blocks_per_seq_q
                c10::optional<at::Tensor> &block_table_dkv_,  // b x max_num_blocks_per_seq_kv
                c10::optional<at::Tensor> &alibi_slopes_, // num_heads or b x num_heads
+               const int total_q,
+               const int total_k,
                const int max_seqlen_q,
                const int max_seqlen_k,          // max sequence length to choose the kernel
                const float p_dropout,         // probability to drop
@@ -1250,10 +1251,8 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size or n
     const auto sizes = q.sizes();
 
     const int batch_size = cu_seqlens_q.numel() - 1;
-    const int total_q = paged_Q ? cu_seqlens_q[batch_size].item<int>() : sizes[0];
     const int num_heads = paged_Q ? sizes[2] : sizes[1];
     const int head_size = paged_Q ? sizes[3] : sizes[2];
-    const int total_k = paged_KV ? cu_seqlens_k[batch_size].item<int>() : k.size(0);
     const int num_heads_k = paged_KV ? k.size(2) : k.size(1);
     if (paged_Q || paged_KV || paged_Out || paged_dQ || paged_dKV) {
         TORCH_CHECK(num_heads_k == num_heads, "MHA/MQA is not currently implemented in paged backward.");

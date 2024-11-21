@@ -33,3 +33,4 @@ benchmarks/*.plk
 benchmarks/*.ipynb
 *.log
 *.txt
+*.png

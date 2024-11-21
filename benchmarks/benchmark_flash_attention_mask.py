@@ -134,7 +134,10 @@ for mask_type in mask_types:
             if mask_type == "causal":
                 mask_ratio = 0.5
             elif mask_type == "two_range":
-                mask_ratio = 256 / seqlen
+                mask_ratio = 0
+                for i in range(seqlen):
+                    mask_ratio += min(i+1, 256)
+                mask_ratio /= seqlen**2
 
             print(f"### mask_type={mask_type}, headdim={headdim}, batch_size={batch_size}, seqlen={seqlen} ###")
             for method in methods:
