@@ -5,8 +5,8 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
-from flash_attn.flash_blocksparse_attn_interface import (
+from bblock_flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
+from bblock_flash_attn.flash_blocksparse_attn_interface import (
     convert_blockmask,
     flash_blocksparse_attn_func,
 )

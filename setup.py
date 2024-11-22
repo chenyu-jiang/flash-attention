@@ -49,7 +49,7 @@ else:
     elif BUILD_TARGET == "rocm":
         IS_ROCM = True
 
-PACKAGE_NAME = "flash_attn"
+PACKAGE_NAME = "bblock_flash_attn"
 
 BASE_WHEEL_URL = (
     "https://github.com/Dao-AILab/flash-attention/releases/download/{tag_name}/{wheel_name}"
@@ -155,7 +155,7 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
     if os.path.exists(os.path.join(torch_dir, "include", "ATen", "CUDAGeneratorImpl.h")):
         generator_flag = ["-DOLD_GENERATOR_PATH"]
 
-    check_if_cuda_home_none("flash_attn")
+    check_if_cuda_home_none("bblock_flash_attn")
     # Check, if CUDA11 is installed for compute capability 8.0
     cc_flag = []
     if CUDA_HOME is not None:
@@ -181,7 +181,7 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
     ext_modules.append(
         CUDAExtension(
-            name="flash_attn_2_cuda",
+            name="bblock_flash_attn_2_cuda",
             sources=[
                 "csrc/flash_attn/flash_api.cpp",
                 "csrc/flash_attn/src/flash_fwd_hdim32_fp16_sm80.cu",
@@ -384,7 +384,7 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
     if os.path.exists(os.path.join(torch_dir, "include", "ATen", "CUDAGeneratorImpl.h")):
         generator_flag = ["-DOLD_GENERATOR_PATH"]
 
-    check_if_rocm_home_none("flash_attn")
+    check_if_rocm_home_none("bblock_flash_attn")
     archs = os.getenv("GPU_ARCHS", "native").split(";")
     validate_and_update_archs(archs)
 
@@ -458,7 +458,7 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
 
     ext_modules.append(
         CUDAExtension(
-            name="flash_attn_2_cuda",
+            name="bblock_flash_attn_2_cuda",
             sources=renamed_sources,
             extra_compile_args=extra_compile_args,
             include_dirs=include_dirs,
@@ -467,7 +467,7 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
 
 
 def get_package_version():
-    with open(Path(this_dir) / "flash_attn" / "__init__.py", "r") as f:
+    with open(Path(this_dir) / "bblock_flash_attn" / "__init__.py", "r") as f:
         version_match = re.search(r"^__version__\s*=\s*(.*)$", f.read(), re.MULTILINE)
     public_version = ast.literal_eval(version_match.group(1))
     local_version = os.environ.get("FLASH_ATTN_LOCAL_VERSION")
@@ -575,7 +575,7 @@ setup(
             "dist",
             "docs",
             "benchmarks",
-            "flash_attn.egg-info",
+            "bblock_flash_attn.egg-info",
         )
     ),
     author="Tri Dao",

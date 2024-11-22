@@ -7,12 +7,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from einops import rearrange, repeat
-from flash_attn.layers.rotary import apply_rotary_emb
+from bblock_flash_attn.layers.rotary import apply_rotary_emb
 
-from flash_attn.utils.benchmark import benchmark_all, benchmark_forward, benchmark_backward
-from flash_attn.utils.benchmark import benchmark_fwd_bwd, benchmark_combined
+from bblock_flash_attn.utils.benchmark import benchmark_all, benchmark_forward, benchmark_backward
+from bblock_flash_attn.utils.benchmark import benchmark_fwd_bwd, benchmark_combined
 
-from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+from bblock_flash_attn import flash_attn_qkvpacked_func, flash_attn_func
 
 try:
     import xformers.ops as xops

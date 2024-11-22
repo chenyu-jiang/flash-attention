@@ -5,9 +5,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from flash_attn.layers.rotary import apply_rotary_emb, apply_rotary_emb_torch
-from flash_attn.layers.rotary import apply_rotary_emb_qkv_, apply_rotary_emb_kv_
-from flash_attn.bert_padding import pad_input, unpad_input
+from bblock_flash_attn.layers.rotary import apply_rotary_emb, apply_rotary_emb_torch
+from bblock_flash_attn.layers.rotary import apply_rotary_emb_qkv_, apply_rotary_emb_kv_
+from bblock_flash_attn.bert_padding import pad_input, unpad_input
 
 is_sm8x = torch.cuda.get_device_capability("cuda") >= (8, 0)
 
@@ -278,7 +278,7 @@ def test_compilation_count():
     torch.manual_seed(42)
 
     from triton.runtime.jit import JITFunction
-    from flash_attn.ops.triton.rotary import rotary_kernel
+    from bblock_flash_attn.ops.triton.rotary import rotary_kernel
     compilation_count = 0
 
     def count_compilations(*args, **kwargs):

@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from flash_attn import (
+from bblock_flash_attn import (
     flash_attn_func,
     flash_attn_kvpacked_func,
     flash_attn_qkvpacked_func,
@@ -25,7 +25,7 @@ from test_flash_attn import (
     attention_qkvpacked_ref,
 )
 
-from flash_attn.layers.rotary import apply_rotary_emb
+from bblock_flash_attn.layers.rotary import apply_rotary_emb
 
 def is_bwd_hdim_supported(d):
     return d <= 256
