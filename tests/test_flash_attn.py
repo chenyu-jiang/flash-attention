@@ -14,6 +14,7 @@ from bblock_flash_attn import (
     flash_attn_varlen_qkvpacked_func,
     flash_attn_with_kvcache,
 )
+from flash_attn import flash_attn_varlen_kvpacked_func as flash_attn_varlen_kvpacked_func_ref
 from bblock_flash_attn.bert_padding import pad_input, unpad_input
 from bblock_flash_attn.flash_attn_interface import _get_block_size_n
 from bblock_flash_attn.layers.rotary import apply_rotary_emb
@@ -1835,8 +1836,8 @@ def test_flash_attn_varlen_block_table(
     print("====================FORWARD===================")
     print("==============================================")
     # unblocked qkv and out
-    if not masked:
-        out_unpad, sm_lse_unpad, _ = flash_attn_varlen_kvpacked_func(
+    if not masked or mask_type == "causal":
+        out_unpad, sm_lse_unpad, _ = flash_attn_varlen_kvpacked_func_ref(
             q_unpad,
             kv_unpad,
             cu_seqlens_q,
@@ -1844,30 +1845,7 @@ def test_flash_attn_varlen_block_table(
             max_seqlen_q,
             max_seqlen_k,
             0.0,
-            causal=causal,
-            window_size=window_size,
-            softcap=softcap,
-            alibi_slopes=alibi_slopes,
-            deterministic=deterministic,
-            return_attn_probs=True,
-        )
-        # check that the blocked and unblocked outputs are the same
-        print(f"Output max diff blocked v.s. unblocked: {(out_unpad_blocked - out_unpad).abs().max().item()}")
-        print(f"Output mean diff blocked v.s. unblocked: {(out_unpad_blocked - out_unpad).abs().mean().item()}")
-        print(f"Sm LSE max diff blocked v.s. unblocked: {(sm_lse_unpad_blocked - sm_lse_unpad).abs().max().item()}")
-        print(f"Sm LSE mean diff blocked v.s. unblocked: {(sm_lse_unpad_blocked - sm_lse_unpad).abs().mean().item()}")
-    elif mask_type == "causal":
-        out_unpad, sm_lse_unpad, _ = flash_attn_varlen_kvpacked_func(
-            q_unpad,
-            kv_unpad,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            total_q,
-            total_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            0.0,
-            causal=True,
+            causal=mask_type=="causal",
             window_size=window_size,
             softcap=softcap,
             alibi_slopes=alibi_slopes,
@@ -3097,5 +3075,5 @@ if __name__ == "__main__":
     #     512, 768, 128, 0.0, False, False, False, False, "mha", torch.bfloat16, True, 0.0
     # )
     test_flash_attn_varlen_block_table(
-        2048, 1024, 64, False, 256, False, False, "mha", torch.bfloat16, 0.0, masked=True, mask_type="two_ranges"
+        2048, 2048, 256, False, 256, False, False, "mha", torch.bfloat16, 0.0, masked=True, mask_type="causal"
     )
