@@ -1131,13 +1131,13 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x multipl
 std::vector<at::Tensor>
 mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size or num_blocks x page_block_size x num_heads x head_size if there's a block_table.
                const at::Tensor &q,   // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size if there's a block_table.
-               const at::Tensor &k,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size_k if there's a block_table.
-               const at::Tensor &v,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size_k if there's a block_table.
+               const at::Tensor &k,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
+               const at::Tensor &v,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
                const at::Tensor &out,   // total_q x num_heads x head_size or num_blocks x page_block_size x num_heads x head_size if there's a block_table.
                const at::Tensor &softmax_lse,    // h x total_q, softmax logsumexp or h x num_blocks x page_block_size if there's a block_table.
                c10::optional<at::Tensor> &dq_,   // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size if there's a block_table.
-               c10::optional<at::Tensor> &dk_,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size_k if there's a block_table.
-               c10::optional<at::Tensor> &dv_,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads x head_size_k if there's a block_table.
+               c10::optional<at::Tensor> &dk_,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
+               c10::optional<at::Tensor> &dv_,   // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
                const at::Tensor &cu_seqlens_q,  // b+1
                const at::Tensor &cu_seqlens_k,  // b+1
                c10::optional<at::Tensor> &attn_range_, // int tensor of shape (2, sum(q_seqlens)) or (2, 2, sum(q_seqlens)) (if we have two ranges)
@@ -1254,9 +1254,13 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size or n
     const int num_heads = paged_Q ? sizes[2] : sizes[1];
     const int head_size = paged_Q ? sizes[3] : sizes[2];
     const int num_heads_k = paged_KV ? k.size(2) : k.size(1);
-    if (paged_Q || paged_KV || paged_Out || paged_dQ || paged_dKV) {
-        TORCH_CHECK(num_heads_k == num_heads, "MHA/MQA is not currently implemented in paged backward.");
-    }
+    // if (paged_Q || paged_KV || paged_Out || paged_dQ || paged_dKV) {
+    //     TORCH_CHECK(num_heads_k == num_heads, "MQA/GQA is not currently implemented in paged backward.");
+    // }
+    // NOTE: MQA/GQA is partially supported: dk_ and dv_ buffer should be small
+    //       , compact and dedicated to this operation.
+    //       Since we are doing a sum reduction across the entire expanded
+    //       buffer and overwriting its content.
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
     TORCH_CHECK(head_size <= 256, "FlashAttention backward only supports head dimension at most 256");
@@ -1393,8 +1397,13 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size or n
 
     at::Tensor dk_expanded, dv_expanded;
     if (num_heads_k != num_heads) {  // MQA / GQA
-        dk_expanded = torch::empty({total_k, num_heads, head_size}, opts);
-        dv_expanded = torch::empty({total_k, num_heads, head_size}, opts);
+        if (paged_dKV) {
+            dk_expanded = torch::zeros({num_blocks_dkv, page_block_size_dkv, num_heads, head_size}, opts);
+            dv_expanded = torch::zeros({num_blocks_dkv, page_block_size_dkv, num_heads, head_size}, opts);
+        } else {
+            dk_expanded = torch::empty({total_k, num_heads, head_size}, opts);
+            dv_expanded = torch::empty({total_k, num_heads, head_size}, opts);
+        }
     } else {
         dk_expanded = dk;
         dv_expanded = dv;
@@ -1472,8 +1481,8 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size or n
     if (paged_dKV) {
         params.block_table_dkv = block_table_dkv.data_ptr<int>();
         params.block_table_batch_stride_dkv = block_table_dkv.stride(0);
-        params.dk_batch_stride = dk.stride(0);
-        params.dv_batch_stride = dv.stride(0);
+        params.dk_batch_stride = dk_expanded.stride(0);
+        params.dv_batch_stride = dv_expanded.stride(0);
         params.page_block_size_dkv = page_block_size_dkv;
     } else {
         params.block_table_dkv = nullptr;
@@ -1556,8 +1565,13 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size or n
 
     // For MQA/GQA we need to sum dK and dV across the groups
     if (num_heads_k != num_heads) {
-        at::sum_out(dk, at::reshape(dk_expanded, {total_k, num_heads_k, num_heads / num_heads_k, head_size}), {2});
-        at::sum_out(dv, at::reshape(dv_expanded, {total_k, num_heads_k, num_heads / num_heads_k, head_size}), {2});
+        if (paged_dKV) {
+            at::sum_out(dk, at::reshape(dk_expanded, {num_blocks_dkv, page_block_size_dkv, num_heads_k, num_heads / num_heads_k, head_size}), {3});
+            at::sum_out(dv, at::reshape(dv_expanded, {num_blocks_dkv, page_block_size_dkv, num_heads_k, num_heads / num_heads_k, head_size}), {3});
+        } else {
+            at::sum_out(dk, at::reshape(dk_expanded, {total_k, num_heads_k, num_heads / num_heads_k, head_size}), {2});
+            at::sum_out(dv, at::reshape(dv_expanded, {total_k, num_heads_k, num_heads / num_heads_k, head_size}), {2});
+        }
     }
 
     return { dq, dk, dv, softmax_d };
