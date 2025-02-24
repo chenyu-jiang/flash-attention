@@ -3075,5 +3075,5 @@ if __name__ == "__main__":
     #     512, 768, 128, 0.0, False, False, False, False, "mha", torch.bfloat16, True, 0.0
     # )
     test_flash_attn_varlen_block_table(
-        2048, 2048, 256, False, 256, False, False, "gqa", torch.bfloat16, 0.0, masked=True, mask_type="causal"
+        2048, 2048, 256, False, 256, False, False, "gqa", torch.bfloat16, 0.0, masked=True, mask_type="two_ranges"
     )

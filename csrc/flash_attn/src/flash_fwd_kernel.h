@@ -633,7 +633,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         // if (tidx == 0) {
         //     printf("bidb = %d, bidh = %d, m_block = %d, n_split_idx = %d, n_block_min = %d, n_block_max = %d, max_col_id_range1_for_curr_mblock = %d, min_col_id_range2_for_curr_mblock = %d, n_block_skip_start = %d, n_block_skip_end = %d\n", bidb, bidh, m_block, n_split_idx, n_block_min, n_block_max, max_col_id_range1_for_curr_mblock, min_col_id_range2_for_curr_mblock, n_block_skip_start, n_block_skip_end);
         // }
-        // __syncthreads();
+        __syncthreads();
     }
     // if (tidx == 0) {
     //     printf("bidb = %d, bidh = %d, m_block = %d, n_split_idx = %d, n_block_min = %d, n_block_max = %d, n_block_skip_start = %d, n_block_skip_end = %d\n", bidb, bidh, m_block, n_split_idx, n_block_min, n_block_max, n_block_skip_start, n_block_skip_end);
