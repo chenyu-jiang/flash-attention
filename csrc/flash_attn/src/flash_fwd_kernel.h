@@ -707,7 +707,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     const int block_table_kv_offset = block_table_kv == nullptr ? 0 : (n_block_max - 1) * kBlockN - block_table_kv_idx * params.page_block_size_kv;
 
     const index_t row_offset_q = block_table_q == nullptr
-        ? binfo.q_offset(params.q_batch_stride, params.q_row_stride, bidb)
+        ? binfo.q_offset(params.q_batch_stride, params.q_row_stride, bidb) + m_block * kBlockM * params.q_row_stride
         : block_table_q[block_table_q_idx] * params.q_batch_stride + block_table_q_offset * params.q_row_stride;
 
     const index_t row_offset_k = block_table_kv == nullptr
