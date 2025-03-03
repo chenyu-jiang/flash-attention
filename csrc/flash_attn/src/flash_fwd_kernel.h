@@ -589,22 +589,42 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         // load the min value from shared memory
         const int max_col_id_for_curr_mblock = std::max(reinterpret_cast<int *>(smem_)[0], reinterpret_cast<int *>(smem_)[1]);
         n_block_max = std::min(n_block_max, cute::ceil_div(max_col_id_for_curr_mblock - 1, kBlockN));
+        // if (tidx == 0 && bidh == 0) {
+        //     printf("bidb = %d, bidh = %d, m_block = %d, n_split_idx = %d, n_block_min = %d, n_block_max = %d, max_col_id_for_curr_mblock = %d\n", bidb, bidh, m_block, n_split_idx, n_block_min, n_block_max, max_col_id_for_curr_mblock);
+        // }
     }
     int n_block_skip_start = -1;
     int n_block_skip_end = -1;
+    bool should_skip = n_block_min >= n_block_max;
     if constexpr (Has_two_ranges) {
         __syncthreads();
         // calculate the range of block_n that should be skipped
+        const int* attn_range_min_ptr1 = params.attn_range_min_ptr1;
         const int* attn_range_max_ptr1 = params.attn_range_max_ptr1;
         const int* attn_range_min_ptr2 = params.attn_range_min_ptr2;
+        const int* attn_range_max_ptr2 = params.attn_range_max_ptr2;
         // direct load the value to register
         const int thr_offset = m_block * kBlockM + tidx;
         const int warp_id = tidx / 32;
         const int lane_id = tidx % 32;
-        int thr_val_max = thr_offset >= binfo.actual_seqlen_q ?
+        const int thr_val_range1_start = thr_offset >= binfo.actual_seqlen_q ?
+            0 :
+            attn_range_min_ptr1[binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM + tidx];
+        const int thr_val_range1_end = thr_offset >= binfo.actual_seqlen_q ?
+            0 :
+            attn_range_max_ptr1[binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM + tidx];   
+        const int thr_val_range2_start = thr_offset >= binfo.actual_seqlen_q ?
+            params.seqlen_k :
+            attn_range_min_ptr2[binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM + tidx];
+        const int thr_val_range2_end = thr_offset >= binfo.actual_seqlen_q ?
+            params.seqlen_k :
+            attn_range_max_ptr2[binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM + tidx];
+        const bool is_range1_valid = thr_val_range1_start < thr_val_range1_end;
+        const bool is_range2_valid = thr_val_range2_start < thr_val_range2_end;
+        int thr_val_max = !is_range1_valid ?
             0 :
             attn_range_max_ptr1[binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM + tidx];
-        int thr_val_min = thr_offset >= binfo.actual_seqlen_q ?
+        int thr_val_min = !is_range2_valid ?
             params.seqlen_k :
             attn_range_min_ptr2[binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM + tidx];
         if (warp_id == 0 || warp_id == 1) {
@@ -630,9 +650,12 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             n_block_skip_start = max_n_block_range1;
             n_block_skip_end = min_n_block_range2;
         }
-        // if (tidx == 0) {
+        // if (tidx == 0 && bidh == 0) {
         //     printf("bidb = %d, bidh = %d, m_block = %d, n_split_idx = %d, n_block_min = %d, n_block_max = %d, max_col_id_range1_for_curr_mblock = %d, min_col_id_range2_for_curr_mblock = %d, n_block_skip_start = %d, n_block_skip_end = %d\n", bidb, bidh, m_block, n_split_idx, n_block_min, n_block_max, max_col_id_range1_for_curr_mblock, min_col_id_range2_for_curr_mblock, n_block_skip_start, n_block_skip_end);
         // }
+        if (n_block_skip_start <= n_block_min && n_block_skip_end >= n_block_max) {
+            should_skip = true;
+        }
         __syncthreads();
     }
     // if (tidx == 0) {
@@ -642,11 +665,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     //     const index_t row_offset_lseaccum = ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM;
     //     printf("bidb = %d, bidh = %d, m_block = %d, n_split_idx = %d, num_n_splits = %d, n_block_min = %d, n_block_max = %d, row_offset_lseaccum = %d\n", bidb, bidh, m_block, n_split_idx, num_n_splits, n_block_min, n_block_max, row_offset_lseaccum);
     // }
-    if (n_block_min >= n_block_max) {  // This also covers the case where n_block_max <= 0
+    if (should_skip) {  // This also covers the case where n_block_max <= 0
         // We exit early and write 0 to gOaccum and -inf to gLSEaccum.
         // Otherwise we might read OOB elements from gK and gV,
         // or get wrong results when we combine gOaccum from different blocks.
-        // if(tidx == 0) {
+        // if(tidx == 0 && bidh == 0) {
         //     printf("bidb = %d, bidh = %d, m_block = %d, row_idx_range = (%d, %d), n_split_idx = %d, n_block_min = %d, n_block_max = %d Exit Early.\n", bidb, bidh, m_block, m_block * kBlockM, (m_block + 1) * kBlockM, n_split_idx, n_block_min, n_block_max);
         // }
         const int *block_table_out = params.block_table_out == nullptr ? nullptr : params.block_table_out + bidb * params.block_table_batch_stride_out;
@@ -658,8 +681,8 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             : block_table_out[block_table_o_idx] * params.o_batch_stride + block_table_o_offset * params.o_row_stride + bidh * params.o_head_stride;
         const index_t row_offset_oaccum = (((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q
             + m_block * kBlockM) * params.d_rounded;
-        const index_t row_offset_lseaccum = block_table_out == nullptr ?
-                                            ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q + m_block * kBlockM
+        const index_t row_offset_lseaccum = block_table_out == nullptr ? ((Split || !params.unpadded_lse ? 
+                                                                        ((n_split_idx * params.b + bidb) * params.h + bidh) * params.seqlen_q : bidh * params.total_q + binfo.q_offset(params.seqlen_q, 1, bidb)) + m_block * kBlockM)
                                             : (params.num_page_blocks_out * params.page_block_size_out * bidh) + (block_table_out[block_table_o_idx] * params.page_block_size_out + block_table_o_offset);
         Tensor gOaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementO *>(Split ? params.oaccum_ptr : params.o_ptr) + (Split ? row_offset_oaccum : row_offset_o)),
                                       Shape<Int<kBlockM>, Int<kHeadDim>>{},
@@ -1609,7 +1632,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                                  make_stride(Split ? kHeadDim : params.o_row_stride, _1{}));
     Tensor gLSEaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(Split ? params.softmax_lseaccum_ptr : params.softmax_lse_ptr) + row_offset_lseaccum),
                                    Shape<Int<kBlockM>>{}, Stride<_1>{});
-    // if (tidx == 0) { printf("row_offset_o = %d, bidh = %d, gOaccum = %p\n", row_offset_o, bidh, gOaccum.data()); }
+    // if (tidx == 0) { printf("row_offset_o = %d, bidh = %d, gOaccum = %p, gLSEaccum=%p\n", row_offset_o, bidh, gOaccum.data(), gLSEaccum.data()); }
 
     GmemTiledCopyO gmem_tiled_copy_Oaccum;
     auto gmem_thr_copy_Oaccum = gmem_tiled_copy_Oaccum.get_thread_slice(tidx);
