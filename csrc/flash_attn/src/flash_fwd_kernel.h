@@ -1117,7 +1117,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 // __syncthreads();
 
                 const int next_n_block = ((n_block - 1) < n_block_skip_end && (n_block - 1) >= n_block_skip_start) ? n_block_skip_start - 1 : n_block - 1;
-                if (n_block > n_block_min) {
+                if (n_block > n_block_min && next_n_block >= n_block_min) {
                     // Advance gK
                     if (block_table_kv == nullptr) {
                         const int nblock_diff = n_block - next_n_block;
@@ -1234,7 +1234,10 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 flash::cp_async_wait<0>();
                 __syncthreads();
                 const int next_n_block = ((n_block - 1) < n_block_skip_end && (n_block - 1) >= n_block_skip_start) ? n_block_skip_start - 1 : n_block - 1;
-                if (n_block > n_block_min) {
+                // if(tidx == 0 && bidh == 0) {
+                //     printf("bidb = %d, bidh = %d, m_block = %d, n_block = %d, n_block_skip_start = %d, n_block_skip_end = %d, next_n_block = %d\n", bidb, bidh, m_block, n_block, n_block_skip_start, n_block_skip_end, next_n_block);
+                // }
+                if (n_block > n_block_min && next_n_block >= n_block_min) {
                     // Advance gK
                     if (block_table_kv == nullptr) {
                         const int nblock_diff = n_block - next_n_block;
