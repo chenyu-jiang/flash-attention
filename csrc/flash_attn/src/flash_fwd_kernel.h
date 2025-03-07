@@ -566,7 +566,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     }
     if constexpr (Has_range) {
         __syncthreads();
-        const int* attn_range_max_ptr = Has_two_ranges ? params.attn_range_max_ptr2 : params.attn_range_max_ptr1;
+        const int* attn_range_max_ptr = params.attn_range_max_ptr1;
         // direct load the value to register
         const int thr_offset = m_block * kBlockM + tidx;
         const int warp_id = tidx / 32;
@@ -574,6 +574,12 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         int thr_val = thr_offset >= binfo.actual_seqlen_q ?
             0 :
             attn_range_max_ptr[binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM + tidx];
+        if constexpr (Has_two_ranges) {
+            const int* attn_range2_max_ptr = params.attn_range_max_ptr2;
+            thr_val = thr_offset >= binfo.actual_seqlen_q ?
+                0 :
+                std::max(thr_val, attn_range2_max_ptr[binfo.q_offset(params.seqlen_q, 1, bidb) + m_block * kBlockM + tidx]);
+        }
         if (warp_id == 0 || warp_id == 1) {
             // parallel reduction with two warps
             #pragma unroll
