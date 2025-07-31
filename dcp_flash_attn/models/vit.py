@@ -14,13 +14,13 @@ from timm.models.helpers import named_apply
 from torch.nn.init import trunc_normal_
 from torchvision.ops import StochasticDepth
 
-from bblock_flash_attn.layers.patch_embed import PatchEmbed
-from bblock_flash_attn.modules.block import Block
-from bblock_flash_attn.modules.mha import MHA
-from bblock_flash_attn.modules.mlp import FusedMLP, Mlp
+from dcp_flash_attn.layers.patch_embed import PatchEmbed
+from dcp_flash_attn.modules.block import Block
+from dcp_flash_attn.modules.mha import MHA
+from dcp_flash_attn.modules.mlp import FusedMLP, Mlp
 
 try:
-    from bblock_flash_attn.ops.triton.layer_norm import layer_norm_fn
+    from dcp_flash_attn.ops.triton.layer_norm import layer_norm_fn
 except ImportError:
     layer_norm_fn = None
 

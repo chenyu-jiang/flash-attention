@@ -4,7 +4,7 @@
 import torch
 from torch.nn import init
 
-from bblock_flash_attn.ops.layer_norm import (
+from dcp_flash_attn.ops.layer_norm import (
     DropoutAddLayerNormFn,
     DropoutAddLayerNormParallelResidualFn,
     DropoutAddLayerNormSubsetFn,

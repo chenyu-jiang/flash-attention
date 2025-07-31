@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from bblock_flash_attn import (
+from dcp_flash_attn import (
     flash_attn_func,
     flash_attn_kvpacked_func,
     flash_attn_qkvpacked_func,
@@ -15,9 +15,9 @@ from bblock_flash_attn import (
     flash_attn_with_kvcache,
 )
 from flash_attn import flash_attn_varlen_kvpacked_func as flash_attn_varlen_kvpacked_func_ref
-from bblock_flash_attn.bert_padding import pad_input, unpad_input
-from bblock_flash_attn.flash_attn_interface import _get_block_size_n
-from bblock_flash_attn.layers.rotary import apply_rotary_emb
+from dcp_flash_attn.bert_padding import pad_input, unpad_input
+from dcp_flash_attn.flash_attn_interface import _get_block_size_n
+from dcp_flash_attn.layers.rotary import apply_rotary_emb
 
 MAX_HEADDIM_SM8x = 192
 
@@ -1702,7 +1702,7 @@ def _reconstruct_blockized_dq_dkv(
                 break
     return dq_unpad, dkv_unpad
 
-def test_bblock_flash_attn_varlen_block_table(
+def test_dcp_flash_attn_varlen_block_table(
     seqlen_q, seqlen_k, d, causal, block_size, alibi, deterministic, mha_type, dtype, softcap, masked=False, mask_type="causal"
 ):
     if (
@@ -1980,7 +1980,7 @@ def test_bblock_flash_attn_varlen_block_table(
     assert (dv_padded_blocked - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
 
 
-def test_bblock_flash_attn_varlen_no_block_table(
+def test_dcp_flash_attn_varlen_no_block_table(
     seqlen_q, seqlen_k, d, causal, alibi, deterministic, mha_type, dtype, softcap, masked=False, mask_type="causal"
 ):
     if (
@@ -3225,9 +3225,9 @@ if __name__ == "__main__":
     # test_flash_attn_varlen_output(
     #     512, 768, 128, 0.0, False, False, False, False, "mha", torch.bfloat16, True, 0.0
     # )
-    # test_bblock_flash_attn_varlen_block_table(
+    # test_dcp_flash_attn_varlen_block_table(
     #     2048, 2048, 256, False, 256, False, False, "gqa", torch.bfloat16, 0.0, masked=True, mask_type="two_ranges"
     # )
-    test_bblock_flash_attn_varlen_no_block_table(
+    test_dcp_flash_attn_varlen_no_block_table(
         2048, 2048, 128, False, False, False, "gqa", torch.bfloat16, 0.0, masked=True, mask_type="two_ranges"
     )

@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from bblock_flash_attn.ops.triton.layer_norm import (
+from dcp_flash_attn.ops.triton.layer_norm import (
     layer_norm_fn,
     layer_norm_ref,
     rms_norm_ref,

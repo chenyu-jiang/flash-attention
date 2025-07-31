@@ -10,10 +10,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from apex.transformer import parallel_state, tensor_parallel
 from einops import rearrange
-from bblock_flash_attn.modules.block import Block
-from bblock_flash_attn.modules.mha import MHA, ParallelMHA
-from bblock_flash_attn.modules.mlp import FusedMLP, ParallelFusedMLP
-from bblock_flash_attn.utils.distributed import allreduce_sequence_parallel_grad
+from dcp_flash_attn.modules.block import Block
+from dcp_flash_attn.modules.mha import MHA, ParallelMHA
+from dcp_flash_attn.modules.mlp import FusedMLP, ParallelFusedMLP
+from dcp_flash_attn.utils.distributed import allreduce_sequence_parallel_grad
 
 is_sm8x = torch.cuda.get_device_capability("cuda")[0] >= 8
 

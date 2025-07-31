@@ -14,16 +14,16 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers import GPT2Config
 
-from bblock_flash_attn.models.bigcode import remap_state_dict_hf_bigcode
-from bblock_flash_attn.models.falcon import remap_state_dict_hf_falcon
-from bblock_flash_attn.models.gpt_neox import remap_state_dict_hf_gpt_neox
-from bblock_flash_attn.models.gptj import remap_state_dict_hf_gptj
-from bblock_flash_attn.models.llama import remap_state_dict_hf_llama
-from bblock_flash_attn.models.opt import remap_state_dict_hf_opt
-from bblock_flash_attn.modules.block import Block, ParallelBlock
-from bblock_flash_attn.modules.embedding import GPT2Embeddings, ParallelGPT2Embeddings
-from bblock_flash_attn.modules.mha import MHA, ParallelMHA
-from bblock_flash_attn.modules.mlp import (
+from dcp_flash_attn.models.bigcode import remap_state_dict_hf_bigcode
+from dcp_flash_attn.models.falcon import remap_state_dict_hf_falcon
+from dcp_flash_attn.models.gpt_neox import remap_state_dict_hf_gpt_neox
+from dcp_flash_attn.models.gptj import remap_state_dict_hf_gptj
+from dcp_flash_attn.models.llama import remap_state_dict_hf_llama
+from dcp_flash_attn.models.opt import remap_state_dict_hf_opt
+from dcp_flash_attn.modules.block import Block, ParallelBlock
+from dcp_flash_attn.modules.embedding import GPT2Embeddings, ParallelGPT2Embeddings
+from dcp_flash_attn.modules.mha import MHA, ParallelMHA
+from dcp_flash_attn.modules.mlp import (
     FusedMLP,
     GatedMlp,
     Mlp,
@@ -31,28 +31,28 @@ from bblock_flash_attn.modules.mlp import (
     ParallelGatedMlp,
     ParallelMLP,
 )
-from bblock_flash_attn.ops.activations import sqrelu_fwd
-from bblock_flash_attn.utils.distributed import (
+from dcp_flash_attn.ops.activations import sqrelu_fwd
+from dcp_flash_attn.utils.distributed import (
     all_gather,
     all_gather_raw,
     get_dim_for_local_rank,
     sync_shared_params,
 )
-from bblock_flash_attn.utils.generation import GenerationMixin
-from bblock_flash_attn.utils.pretrained import state_dict_from_pretrained
+from dcp_flash_attn.utils.generation import GenerationMixin
+from dcp_flash_attn.utils.pretrained import state_dict_from_pretrained
 
 try:
-    from bblock_flash_attn.ops.fused_dense import ColumnParallelLinear
+    from dcp_flash_attn.ops.fused_dense import ColumnParallelLinear
 except ImportError:
     ColumnParallelLinear = None
 
 try:
-    from bblock_flash_attn.ops.triton.mlp import FusedDenseSqreluDense
+    from dcp_flash_attn.ops.triton.mlp import FusedDenseSqreluDense
 except ImportError:
     FusedDenseSqreluDense = None
 
 try:
-    from bblock_flash_attn.ops.triton.layer_norm import layer_norm_fn, RMSNorm
+    from dcp_flash_attn.ops.triton.layer_norm import layer_norm_fn, RMSNorm
 except ImportError:
     layer_norm_fn, RMSNorm = None, None
 

@@ -5,7 +5,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from bblock_flash_attn.ops.fused_dense import FusedDense, FusedMLP
+from dcp_flash_attn.ops.fused_dense import FusedDense, FusedMLP
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

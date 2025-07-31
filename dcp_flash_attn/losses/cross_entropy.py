@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 
-from bblock_flash_attn.ops.triton.cross_entropy import cross_entropy_loss
+from dcp_flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 
 
 class CrossEntropyLoss(nn.Module):

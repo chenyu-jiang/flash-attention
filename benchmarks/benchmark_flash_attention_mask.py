@@ -8,10 +8,10 @@ import torch.nn.functional as F
 
 from einops import rearrange, repeat
 
-from bblock_flash_attn.utils.benchmark import benchmark_all, benchmark_forward, benchmark_backward
-from bblock_flash_attn.utils.benchmark import benchmark_fwd_bwd, benchmark_combined
+from dcp_flash_attn.utils.benchmark import benchmark_all, benchmark_forward, benchmark_backward
+from dcp_flash_attn.utils.benchmark import benchmark_fwd_bwd, benchmark_combined
 
-from bblock_flash_attn import flash_attn_varlen_kvpacked_func
+from dcp_flash_attn import flash_attn_varlen_kvpacked_func
 
 from torch.nn.functional import scaled_dot_product_attention as sdpa
 

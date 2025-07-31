@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from apex.transformer import parallel_state, tensor_parallel
-from bblock_flash_attn.ops.fused_dense import ColumnParallelLinear, FusedDense, FusedMLP, ParallelFusedMLP
+from dcp_flash_attn.ops.fused_dense import ColumnParallelLinear, FusedDense, FusedMLP, ParallelFusedMLP
 
 is_sm8x = torch.cuda.get_device_capability("cuda")[0] >= 8
 

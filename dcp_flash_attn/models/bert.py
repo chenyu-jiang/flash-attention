@@ -22,31 +22,31 @@ from transformers.models.bert.modeling_bert import (
     BertForPreTrainingOutput,
 )
 
-from bblock_flash_attn.bert_padding import (
+from dcp_flash_attn.bert_padding import (
     index_first_axis,
     index_first_axis_residual,
     pad_input,
     unpad_input,
 )
-from bblock_flash_attn.modules.block import Block
-from bblock_flash_attn.modules.embedding import BertEmbeddings
-from bblock_flash_attn.modules.mha import MHA
-from bblock_flash_attn.modules.mlp import FusedMLP, Mlp
-from bblock_flash_attn.utils.pretrained import state_dict_from_pretrained
+from dcp_flash_attn.modules.block import Block
+from dcp_flash_attn.modules.embedding import BertEmbeddings
+from dcp_flash_attn.modules.mha import MHA
+from dcp_flash_attn.modules.mlp import FusedMLP, Mlp
+from dcp_flash_attn.utils.pretrained import state_dict_from_pretrained
 
 try:
-    from bblock_flash_attn.ops.fused_dense import FusedDense
+    from dcp_flash_attn.ops.fused_dense import FusedDense
 except ImportError:
     FusedDense = None
 
 try:
-    from bblock_flash_attn.ops.triton.layer_norm import layer_norm_fn
+    from dcp_flash_attn.ops.triton.layer_norm import layer_norm_fn
 except ImportError:
     layer_norm_fn = None
 
 
 try:
-    from bblock_flash_attn.losses.cross_entropy import CrossEntropyLoss
+    from dcp_flash_attn.losses.cross_entropy import CrossEntropyLoss
 except ImportError:
     CrossEntropyLoss = None
 
